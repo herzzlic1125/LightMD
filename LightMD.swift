@@ -1,0 +1,1557 @@
+import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
+import Markdown
+import CoreFoundation
+
+func sameSourceBytes(_ first: String, _ second: String) -> Bool {
+    first.utf8.elementsEqual(second.utf8)
+}
+
+enum ReadingRun: Equatable {
+    case han, hanPunctuation, english, digit
+}
+
+let chinesePunctuation: Set<Character> = Set("，。：；「」（）《》？！～、．“”‘’【】")
+
+func systemSerifFont(size: CGFloat, weight: NSFont.Weight = .regular) -> NSFont {
+    let system = NSFont.systemFont(ofSize: size, weight: weight)
+    guard let descriptor = system.fontDescriptor.withDesign(.serif),
+          let serif = NSFont(descriptor: descriptor, size: size) else { return system }
+    return serif
+}
+
+func readingRun(for character: Character, previous: ReadingRun?, next: Character?) -> ReadingRun {
+    let scalar = character.unicodeScalars.first?.value ?? 0
+    if chinesePunctuation.contains(character) { return .hanPunctuation }
+    if (48...57).contains(scalar) { return .digit }
+    if (65...90).contains(scalar) || (97...122).contains(scalar)
+        || (0x00C0...0x024F).contains(scalar) || (0x1E00...0x1EFF).contains(scalar) {
+        return .english
+    }
+    if scalar < 128 && character != " " && character != "\t" && character != "\n" {
+        let nextIsDigit = next.flatMap { $0.unicodeScalars.first?.value }.map { (48...57).contains($0) } ?? false
+        if previous == .digit || (nextIsDigit && ".:-/+".contains(character)) { return .digit }
+        return .english
+    }
+    return .han
+}
+
+private func readingFont(for run: ReadingRun, size: CGFloat, strong: Bool, emphasized: Bool, heading: Bool) -> Font {
+    let font: Font
+    switch run {
+    case .english, .digit:
+        font = Font(systemSerifFont(size: size, weight: strong
+                                    ? (heading ? .semibold : .bold) : .regular))
+    case .han:
+        font = .custom(emphasized ? (strong ? "STKaitiSC-Bold" : "STKaitiSC-Regular")
+                    : strong ? (heading ? "STSongti-SC-Bold" : "STSongti-SC-Black")
+                             : "STSongti-SC-Regular", size: size)
+    case .hanPunctuation:
+        font = .custom(emphasized ? (strong ? "STKaitiSC-Bold" : "STKaitiSC-Regular")
+                    : strong && !heading ? "STSongti-SC-Black"
+                    : strong ? "SimSong-Bold" : "SimSong", size: size)
+    }
+    return emphasized && (run == .english || run == .digit) ? font.italic() : font
+}
+
+func readingBaseline(for run: ReadingRun, size: CGFloat, strong: Bool,
+                     emphasized: Bool, heading: Bool) -> CGFloat {
+    guard run == .han || run == .hanPunctuation else { return 0 }
+    if heading { return size * 0.06 }
+    return strong && !emphasized ? -size * 0.02 : size * 0.04
+}
+
+private func styledReadingText(_ text: String, size: CGFloat, strong: Bool = false,
+                               emphasized: Bool = false, heading: Bool = false) -> SwiftUI.Text {
+    var result = SwiftUI.Text("")
+    var run = ""
+    var runKind: ReadingRun?
+    func styled(_ content: String, kind: ReadingRun) -> SwiftUI.Text {
+        let font = readingFont(for: kind, size: size, strong: strong,
+                               emphasized: emphasized, heading: heading)
+        let fragment = SwiftUI.Text(content).font(font)
+        return fragment.baselineOffset(readingBaseline(for: kind, size: size, strong: strong,
+                                                      emphasized: emphasized, heading: heading))
+    }
+    let characters = Array(text)
+    for (index, character) in characters.enumerated() {
+        let kind = readingRun(for: character, previous: runKind,
+                              next: index + 1 < characters.count ? characters[index + 1] : nil)
+        if let previous = runKind, previous != kind {
+            result = result + styled(run, kind: previous)
+            run = ""
+        }
+        run.append(character)
+        runKind = kind
+    }
+    if let kind = runKind { result = result + styled(run, kind: kind) }
+    return result
+}
+
+struct OutlineEntry: Identifiable {
+    let id: String
+    let title: String
+    let level: Int
+    let slug: String
+}
+
+struct IndexedBlock {
+    let path: String
+    let text: String
+}
+
+struct FileStamp: Equatable {
+    let modified: Date?
+    let size: UInt64
+    let inode: UInt64
+}
+
+struct NavigationRequest {
+    let id = UUID()
+    let tabID: UUID
+    let path: String
+}
+
+struct SearchHit {
+    let path: String
+}
+
+@MainActor
+struct ReaderTab: Identifiable {
+    let id: UUID
+    var url: URL?
+    var source: String
+    var document: Document?
+    var outline: [OutlineEntry]
+    var index: [IndexedBlock]
+    var plainLines: [String]?
+    var scrollLines: [String: Int]
+    var encodingName: String
+    var stamp: FileStamp?
+    var savedSource: String
+    var savedData: Data?
+    var externalConflict: Bool
+    var editRevision: UInt64
+
+    init(id: UUID = UUID(), url: URL? = nil, source: String = "", document: Document? = nil,
+         outline: [OutlineEntry] = [], index: [IndexedBlock] = [], plainLines: [String]? = nil,
+         scrollLines: [String: Int] = [:],
+         encodingName: String = "UTF-8", stamp: FileStamp? = nil,
+         savedSource: String = "", savedData: Data? = nil, externalConflict: Bool = false,
+         editRevision: UInt64 = 0) {
+        self.id = id
+        self.url = url
+        self.source = source
+        self.document = document
+        self.outline = outline
+        self.index = index
+        self.plainLines = plainLines
+        self.scrollLines = scrollLines
+        self.encodingName = encodingName
+        self.stamp = stamp
+        self.savedSource = savedSource
+        self.savedData = savedData
+        self.externalConflict = externalConflict
+        self.editRevision = editRevision
+    }
+
+    var title: String { url?.lastPathComponent ?? "未命名" }
+    var isDirty: Bool { !sameSourceBytes(source, savedSource) }
+}
+
+@MainActor
+final class ReaderState: ObservableObject {
+    @Published var tabs: [ReaderTab]
+    @Published var selectedID: UUID
+    @Published var fontSize: CGFloat = 16
+    @Published var showsOutline = false
+    @Published var isEditing = false
+    @Published var isSearching = false
+    @Published var searchQuery = ""
+    @Published var searchHitIndex = 0
+    @Published var navigationRequest: NavigationRequest?
+    @Published var error: String?
+
+    private var fileTimer: Timer?
+    private var pendingRefresh: [UUID: Task<Void, Never>] = [:]
+    private var pendingParse: [UUID: Task<Void, Never>] = [:]
+    var beforeReload: ((UUID) -> Void)?
+    var afterReload: ((UUID) -> Void)?
+    var beforeModeChange: (() -> Void)?
+    var afterModeChange: (() -> Void)?
+
+    init() {
+        let first = ReaderTab()
+        tabs = [first]
+        selectedID = first.id
+        fileTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.pollFiles() }
+        }
+    }
+
+    var currentTab: ReaderTab? { tabs.first { $0.id == selectedID } }
+    var currentURL: URL? { currentTab?.url }
+    var currentDocument: Document? { currentTab?.document }
+    var currentOutline: [OutlineEntry] { currentTab?.outline ?? [] }
+    var currentLines: [String]? { currentTab?.plainLines }
+    func toggleMode() {
+        beforeModeChange?()
+        isEditing.toggle()
+    }
+
+    var searchHits: [SearchHit] {
+        guard !searchQuery.isEmpty else { return [] }
+        var result: [SearchHit] = []
+        for block in currentTab?.index ?? [] {
+            var remaining = block.text.startIndex..<block.text.endIndex
+            while let match = block.text.range(of: searchQuery,
+                                                options: [.caseInsensitive, .diacriticInsensitive],
+                                                range: remaining), !match.isEmpty {
+                result.append(SearchHit(path: block.path))
+                remaining = match.upperBound..<block.text.endIndex
+            }
+        }
+        return result
+    }
+
+    var activeSearchPath: String? {
+        let hits = searchHits
+        guard !hits.isEmpty else { return nil }
+        return hits[min(searchHitIndex, hits.count - 1)].path
+    }
+
+    func navigate(to path: String, in tabID: UUID? = nil) {
+        guard let id = tabID ?? currentTab?.id else { return }
+        navigationRequest = NavigationRequest(tabID: id, path: path)
+    }
+
+    func moveSearch(by step: Int) {
+        let hits = searchHits
+        guard !hits.isEmpty else { return }
+        searchHitIndex = (searchHitIndex + step + hits.count) % hits.count
+        navigate(to: hits[searchHitIndex].path)
+    }
+
+    private static func plainTitle(_ node: Markup) -> String {
+        if let text = node as? Markdown.Text { return text.string }
+        if let code = node as? InlineCode { return code.code }
+        if let code = node as? CodeBlock { return code.code }
+        if node is SoftBreak || node is LineBreak { return " " }
+        return node.children.map { plainTitle($0) }.joined()
+    }
+
+    private static func slug(_ title: String) -> String {
+        var output = ""
+        var lastWasHyphen = false
+        for scalar in title.lowercased().unicodeScalars {
+            if CharacterSet.alphanumerics.contains(scalar) || scalar == "_" || scalar == "-" {
+                output.unicodeScalars.append(scalar)
+                lastWasHyphen = false
+            } else if CharacterSet.whitespacesAndNewlines.contains(scalar), !output.isEmpty, !lastWasHyphen {
+                output.append("-")
+                lastWasHyphen = true
+            }
+        }
+        return output.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+    }
+
+    private static func collectHeadings(_ node: Markup, path: String, into entries: inout [OutlineEntry]) {
+        if let heading = node as? Heading {
+            entries.append(OutlineEntry(id: path, title: plainTitle(heading), level: heading.level,
+                                        slug: ""))
+        }
+        for (index, child) in node.children.enumerated() {
+            collectHeadings(child, path: "\(path).\(index)", into: &entries)
+        }
+    }
+
+    private static func outline(for document: Document) -> [OutlineEntry] {
+        var entries: [OutlineEntry] = []
+        for (index, block) in document.children.enumerated() {
+            collectHeadings(block, path: String(index), into: &entries)
+        }
+        var counts: [String: Int] = [:]
+        return entries.map { entry in
+            let base = slug(entry.title)
+            let number = counts[base, default: 0]
+            counts[base] = number + 1
+            return OutlineEntry(id: entry.id, title: entry.title, level: entry.level,
+                                slug: number == 0 ? base : "\(base)-\(number)")
+        }
+    }
+
+    private static func index(for document: Document) -> [IndexedBlock] {
+        document.children.enumerated().map { index, block in
+            IndexedBlock(path: String(index), text: plainTitle(block))
+        }
+    }
+
+    private static func scrollLines(for document: Document) -> [String: Int] {
+        var lines: [String: Int] = [:]
+        func collect(_ block: Markup, path: String) {
+            if let line = block.range?.lowerBound.line { lines[path] = line }
+            if block is OrderedList || block is UnorderedList || block is ListItem || block is BlockQuote {
+                for (index, child) in block.children.enumerated() {
+                    collect(child, path: "\(path).\(index)")
+                }
+            }
+        }
+        for (index, block) in document.children.enumerated() {
+            collect(block, path: String(index))
+        }
+        return lines
+    }
+
+    private static func stamp(for url: URL) -> FileStamp? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) else { return nil }
+        return FileStamp(modified: attributes[.modificationDate] as? Date,
+                         size: (attributes[.size] as? NSNumber)?.uint64Value ?? 0,
+                         inode: (attributes[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0)
+    }
+
+    private static func decode(_ data: Data) throws -> (text: String, name: String) {
+        if data.starts(with: [0xEF, 0xBB, 0xBF]),
+           let text = String(data: Data(data.dropFirst(3)), encoding: .utf8) {
+            return (text, "UTF-8 BOM")
+        }
+        if data.starts(with: [0xFF, 0xFE]),
+           let text = String(data: Data(data.dropFirst(2)), encoding: .utf16LittleEndian) {
+            return (text, "UTF-16 LE BOM")
+        }
+        if data.starts(with: [0xFE, 0xFF]),
+           let text = String(data: Data(data.dropFirst(2)), encoding: .utf16BigEndian) {
+            return (text, "UTF-16 BE BOM")
+        }
+        let sample = Array(data.prefix(512))
+        if sample.count >= 16 && sample.count.isMultiple(of: 2) {
+            let evenZeros = stride(from: 0, to: sample.count, by: 2).filter { sample[$0] == 0 }.count
+            let oddZeros = stride(from: 1, to: sample.count, by: 2).filter { sample[$0] == 0 }.count
+            let threshold = sample.count / 8
+            if oddZeros > threshold && evenZeros < threshold / 2,
+               let text = String(data: data, encoding: .utf16LittleEndian) { return (text, "UTF-16 LE") }
+            if evenZeros > threshold && oddZeros < threshold / 2,
+               let text = String(data: data, encoding: .utf16BigEndian) { return (text, "UTF-16 BE") }
+        }
+        if let text = String(data: data, encoding: .utf8) { return (text, "UTF-8") }
+        let gb18030 = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(
+            CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)))
+        if let text = String(data: data, encoding: gb18030) { return (text, "GB18030") }
+        throw NSError(domain: "LightMD", code: 1,
+                      userInfo: [NSLocalizedDescriptionKey: "无法识别文件编码"])
+    }
+
+    private static func makeTab(id: UUID = UUID(), url: URL, text: String,
+                                encoding: String, stamp: FileStamp?, data: Data) -> ReaderTab {
+        if url.pathExtension.lowercased() == "txt" {
+            let normalized = text.replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n")
+            let lines = normalized.components(separatedBy: "\n")
+            return ReaderTab(id: id, url: url, source: text,
+                             index: lines.enumerated().map { IndexedBlock(path: String($0.offset), text: $0.element) },
+                             plainLines: lines,
+                             scrollLines: Dictionary(uniqueKeysWithValues: lines.indices.map { (String($0), $0 + 1) }),
+                             encodingName: encoding, stamp: stamp,
+                             savedSource: text, savedData: data)
+        }
+        let document = Document(parsing: text)
+        return ReaderTab(id: id, url: url, source: text, document: document,
+                         outline: outline(for: document), index: index(for: document),
+                         scrollLines: scrollLines(for: document),
+                         encodingName: encoding, stamp: stamp,
+                         savedSource: text, savedData: data)
+    }
+
+    private static func encode(_ text: String, as name: String) -> Data? {
+        switch name {
+        case "UTF-8 BOM":
+            guard let body = text.data(using: .utf8) else { return nil }
+            return Data([0xEF, 0xBB, 0xBF]) + body
+        case "UTF-16 LE BOM", "UTF-16 LE":
+            guard let body = text.data(using: .utf16LittleEndian) else { return nil }
+            return (name.hasSuffix("BOM") ? Data([0xFF, 0xFE]) : Data()) + body
+        case "UTF-16 BE BOM", "UTF-16 BE":
+            guard let body = text.data(using: .utf16BigEndian) else { return nil }
+            return (name.hasSuffix("BOM") ? Data([0xFE, 0xFF]) : Data()) + body
+        case "GB18030":
+            let encoding = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(
+                CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)))
+            return text.data(using: encoding, allowLossyConversion: false)
+        default:
+            return text.data(using: .utf8)
+        }
+    }
+
+    func updateSource(_ source: String, in tabID: UUID) {
+        guard let index = tabs.firstIndex(where: { $0.id == tabID }),
+              !sameSourceBytes(tabs[index].source, source) else { return }
+        tabs[index].source = source
+        tabs[index].editRevision &+= 1
+        let revision = tabs[index].editRevision
+        pendingParse[tabID]?.cancel()
+        pendingParse[tabID] = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: 180_000_000) }
+            catch { return }
+            self?.publishPreview(for: tabID, revision: revision)
+        }
+    }
+
+    private func publishPreview(for tabID: UUID, revision: UInt64) {
+        guard let index = tabs.firstIndex(where: { $0.id == tabID }),
+              tabs[index].editRevision == revision else { return }
+        let source = tabs[index].source
+        if tabs[index].url?.pathExtension.lowercased() == "txt" {
+            let normalized = source.replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n")
+            let lines = normalized.components(separatedBy: "\n")
+            tabs[index].plainLines = lines
+            tabs[index].document = nil
+            tabs[index].outline = []
+            tabs[index].index = lines.enumerated().map { IndexedBlock(path: String($0.offset), text: $0.element) }
+            tabs[index].scrollLines = Dictionary(uniqueKeysWithValues: lines.indices.map { (String($0), $0 + 1) })
+        } else {
+            let document = Document(parsing: source)
+            tabs[index].document = document
+            tabs[index].outline = Self.outline(for: document)
+            tabs[index].index = Self.index(for: document)
+            tabs[index].scrollLines = Self.scrollLines(for: document)
+            tabs[index].plainLines = nil
+        }
+        pendingParse[tabID] = nil
+    }
+
+    @discardableResult
+    func saveCurrent() -> Bool { save(tabID: selectedID) }
+
+    @discardableResult
+    func saveAsCurrent() -> Bool { saveAs(tabID: selectedID) }
+
+    private func save(tabID: UUID) -> Bool {
+        guard let tab = tabs.first(where: { $0.id == tabID }) else { return false }
+        guard let url = tab.url else { return saveAs(tabID: tabID) }
+        if !tab.isDirty { return true }
+        return write(tabID: tabID, to: url, saveAs: false)
+    }
+
+    private func saveAs(tabID: UUID) -> Bool {
+        guard let tab = tabs.first(where: { $0.id == tabID }) else { return false }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = tab.url?.lastPathComponent ?? "未命名.md"
+        panel.allowedContentTypes = [.plainText, UTType(filenameExtension: "md") ?? .plainText]
+        panel.allowsOtherFileTypes = true
+        guard panel.runModal() == .OK, let url = panel.url else { return false }
+        return write(tabID: tabID, to: url, saveAs: true)
+    }
+
+    private func write(tabID: UUID, to url: URL, saveAs: Bool) -> Bool {
+        guard let index = tabs.firstIndex(where: { $0.id == tabID }) else { return false }
+        let tab = tabs[index]
+        if !saveAs, let baseline = tab.savedData {
+            guard let disk = try? Data(contentsOf: url), disk == baseline else {
+                tabs[index].externalConflict = true
+                error = "文件已在外部修改，当前编辑尚未覆盖磁盘版本。请使用「另存为…」保存副本。"
+                return false
+            }
+        }
+        var encoding = tab.encodingName
+        var data = Self.encode(tab.source, as: encoding)
+        if data == nil && saveAs {
+            encoding = "UTF-8"
+            data = tab.source.data(using: .utf8)
+        }
+        guard let data else {
+            error = "当前编码无法保存新增字符。请用「另存为…」保存 UTF-8 副本。"
+            return false
+        }
+        do {
+            try data.write(to: url, options: .atomic)
+            tabs[index].url = url
+            tabs[index].savedSource = tab.source
+            tabs[index].savedData = data
+            tabs[index].stamp = Self.stamp(for: url)
+            tabs[index].encodingName = encoding
+            tabs[index].externalConflict = false
+            pendingParse[tabID]?.cancel()
+            publishPreview(for: tabID, revision: tab.editRevision)
+            error = nil
+            return true
+        } catch {
+            self.error = "无法保存文件：\(url.path)\n\(error.localizedDescription)"
+            return false
+        }
+    }
+
+    private func pollFiles() {
+        for tab in tabs {
+            guard let url = tab.url, let current = Self.stamp(for: url), current != tab.stamp,
+                  pendingRefresh[tab.id] == nil, !tab.externalConflict else { continue }
+            pendingRefresh[tab.id] = Task { @MainActor in
+                do { try await Task.sleep(nanoseconds: 250_000_000) }
+                catch { return }
+                reload(tabID: tab.id)
+            }
+        }
+    }
+
+    private func reload(tabID: UUID) {
+        defer { pendingRefresh[tabID] = nil }
+        guard let index = tabs.firstIndex(where: { $0.id == tabID }),
+              let url = tabs[index].url, let stamp = Self.stamp(for: url),
+              let data = try? Data(contentsOf: url),
+              let decoded = try? Self.decode(data) else { return }
+        if tabs[index].isDirty {
+            if sameSourceBytes(decoded.text, tabs[index].source) {
+                tabs[index].savedSource = decoded.text
+                tabs[index].savedData = data
+                tabs[index].stamp = stamp
+                tabs[index].externalConflict = false
+            } else if tabs[index].savedData == data {
+                tabs[index].stamp = stamp
+            } else {
+                tabs[index].externalConflict = true
+            }
+            return
+        }
+        if sameSourceBytes(tabs[index].source, decoded.text) {
+            tabs[index].stamp = stamp
+            tabs[index].savedData = data
+            return
+        }
+        if selectedID == tabID { beforeReload?(tabID) }
+        tabs[index] = Self.makeTab(id: tabID, url: url, text: decoded.text,
+                                  encoding: decoded.name, stamp: stamp, data: data)
+        if selectedID == tabID {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+                self?.afterReload?(tabID)
+            }
+        }
+    }
+
+    func newTab() {
+        let tab = ReaderTab()
+        tabs.append(tab)
+        selectedID = tab.id
+    }
+
+    private func confirmDiscardChanges(in tabID: UUID) -> Bool {
+        guard let tab = tabs.first(where: { $0.id == tabID }), tab.isDirty else { return true }
+        let alert = NSAlert()
+        alert.messageText = "保存对「\(tab.title)」的修改吗？"
+        alert.informativeText = "未保存的编辑内容将丢失。"
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "取消")
+        alert.addButton(withTitle: "不保存")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return save(tabID: tabID)
+        case .alertThirdButtonReturn: return true
+        default: return false
+        }
+    }
+
+    func confirmCloseAll() -> Bool {
+        for tab in tabs where tab.isDirty {
+            if !confirmDiscardChanges(in: tab.id) { return false }
+        }
+        return true
+    }
+
+    func closeTab(_ id: UUID) {
+        guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
+        guard confirmDiscardChanges(in: id) else { return }
+        pendingParse[id]?.cancel()
+        pendingParse[id] = nil
+        pendingRefresh[id]?.cancel()
+        pendingRefresh[id] = nil
+        if tabs.count == 1 {
+            tabs[0] = ReaderTab()
+            selectedID = tabs[0].id
+            return
+        }
+        tabs.remove(at: index)
+        if selectedID == id { selectedID = tabs[min(index, tabs.count - 1)].id }
+    }
+
+    @discardableResult
+    func open(_ newURL: URL) -> UUID? {
+        guard ["md", "markdown", "mdown", "txt"].contains(newURL.pathExtension.lowercased()) else {
+            error = "请选择 Markdown 或纯文本文件。"
+            return nil
+        }
+        let scoped = newURL.startAccessingSecurityScopedResource()
+        defer { if scoped { newURL.stopAccessingSecurityScopedResource() } }
+        do {
+            if let existing = tabs.first(where: { $0.url?.standardizedFileURL == newURL.standardizedFileURL }) {
+                selectedID = existing.id
+                return existing.id
+            }
+            let data = try Data(contentsOf: newURL)
+            let decoded = try Self.decode(data)
+            let tab = Self.makeTab(url: newURL, text: decoded.text, encoding: decoded.name,
+                                   stamp: Self.stamp(for: newURL), data: data)
+            if let index = tabs.firstIndex(where: { $0.id == selectedID }),
+               tabs[index].url == nil, !tabs[index].isDirty {
+                tabs[index] = tab
+            } else {
+                tabs.append(tab)
+            }
+            selectedID = tab.id
+            error = nil
+            return tab.id
+        } catch {
+            self.error = "无法读取文件：\(newURL.path)\n\(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    func chooseFile() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.plainText, UTType(filenameExtension: "md") ?? .plainText]
+        panel.allowsOtherFileTypes = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        if panel.runModal() == .OK {
+            for url in panel.urls { open(url) }
+        }
+    }
+
+    func followLink(_ target: URL) {
+        if target.isFileURL {
+            var parts = URLComponents(url: target, resolvingAgainstBaseURL: false)
+            parts?.fragment = nil
+            parts?.query = nil
+            let file = parts?.url ?? target
+            if ["md", "markdown", "mdown", "txt"].contains(file.pathExtension.lowercased()) {
+                if let tabID = open(file), let fragment = target.fragment,
+                   let tab = tabs.first(where: { $0.id == tabID }) {
+                    let label = fragment.removingPercentEncoding ?? fragment
+                    if let entry = tab.outline.first(where: { $0.slug == label || $0.title == label }) {
+                        navigate(to: entry.id, in: tabID)
+                    }
+                }
+            } else {
+                NSWorkspace.shared.open(file)
+            }
+        } else if ["https", "http", "mailto"].contains(target.scheme?.lowercased() ?? "") {
+            NSWorkspace.shared.open(target)
+        }
+    }
+}
+
+@MainActor
+private final class ScrollKeeper {
+    weak var scrollView: NSScrollView?
+    private var savedY: CGFloat?
+    private var savedRatio: CGFloat = 0
+
+    func capture() {
+        guard let scrollView, let document = scrollView.documentView else { return }
+        let clip = scrollView.contentView
+        let maximum = max(0, document.bounds.height - clip.bounds.height)
+        savedY = clip.bounds.origin.y
+        savedRatio = maximum > 0 ? clip.bounds.origin.y / maximum : 0
+    }
+
+    func captureIfNeeded() {
+        if savedY == nil { capture() }
+    }
+
+    func discard() { savedY = nil }
+
+    func restore() {
+        guard let scrollView, let oldY = savedY,
+              let document = scrollView.documentView else { return }
+        document.layoutSubtreeIfNeeded()
+        let clip = scrollView.contentView
+        let maximum = max(0, document.bounds.height - clip.bounds.height)
+        let position = oldY <= maximum ? oldY : maximum * savedRatio
+        clip.scroll(to: CGPoint(x: clip.bounds.origin.x, y: max(0, position)))
+        scrollView.reflectScrolledClipView(clip)
+        savedY = nil
+    }
+}
+
+private final class ScrollResolverView: NSView {
+    var onResolve: ((NSScrollView) -> Void)?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        DispatchQueue.main.async { [weak self] in
+            var ancestor = self?.superview
+            while let view = ancestor {
+                if let scroll = view as? NSScrollView {
+                    self?.onResolve?(scroll)
+                    return
+                }
+                ancestor = view.superview
+            }
+        }
+    }
+}
+
+private struct ScrollResolver: NSViewRepresentable {
+    let onResolve: (NSScrollView) -> Void
+
+    func makeNSView(context: Context) -> ScrollResolverView {
+        let view = ScrollResolverView()
+        view.onResolve = onResolve
+        return view
+    }
+
+    func updateNSView(_ view: ScrollResolverView, context: Context) {
+        view.onResolve = onResolve
+    }
+}
+
+private struct PreviewScrollAnchorKey: PreferenceKey {
+    static var defaultValue: [String: CGFloat] = [:]
+    static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, latest in latest })
+    }
+}
+
+private extension View {
+    func previewScrollAnchor(_ path: String) -> some View {
+        background(GeometryReader { geometry in
+            Color.clear.preference(key: PreviewScrollAnchorKey.self,
+                                   value: [path: geometry.frame(in: .named("previewContent")).minY])
+        })
+    }
+}
+
+struct ReaderView: View {
+    @ObservedObject var state: ReaderState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var scrollKeeper = ScrollKeeper()
+    @State private var scrollSync = ScrollSyncController()
+    @FocusState private var searchFocused: Bool
+    @State private var animatedOutlineInset: CGFloat = 0
+    @State private var outlineBeforeEditing = false
+    @State private var editSplitRatio: CGFloat = 0.4
+    @State private var editSplitDragStart: CGFloat?
+    @State private var editorMounted = false
+    @State private var animatedModeProgress: CGFloat = 0
+    @State private var modeTransitioning = false
+    @State private var modeGeneration = 0
+    @State private var pendingModeCommit: Task<Void, Never>?
+
+    private let outlineWidth: CGFloat = 221
+    private let outlineDuration = 0.28
+    private let modeDuration = 0.28
+
+    private func textWidth(for inset: CGFloat, available width: CGFloat) -> CGFloat {
+        min(760, max(1, width - inset - 60))
+    }
+
+    private func textX(for inset: CGFloat, available width: CGFloat) -> CGFloat {
+        (width - inset - textWidth(for: inset, available: width)) / 2
+    }
+
+    private func settleOutline() {
+        let target = state.showsOutline ? outlineWidth : 0
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            animatedOutlineInset = target
+        }
+    }
+
+    private func transitionOutline(to visible: Bool) {
+        let target = visible ? outlineWidth : 0
+        if reduceMotion {
+            settleOutline()
+            return
+        }
+        withAnimation(.easeInOut(duration: outlineDuration)) {
+            animatedOutlineInset = target
+        }
+    }
+
+    private func settleMode() {
+        pendingModeCommit?.cancel()
+        pendingModeCommit = nil
+        modeGeneration += 1
+        let editing = state.isEditing
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            editorMounted = editing
+            animatedModeProgress = editing ? 1 : 0
+            modeTransitioning = false
+        }
+        scrollSync.isActive = editing
+        if !editing { scrollSync.detachSource() }
+    }
+
+    private func transitionMode(to editing: Bool) {
+        pendingModeCommit?.cancel()
+        modeGeneration += 1
+        let generation = modeGeneration
+        let tabID = state.selectedID
+        let target: CGFloat = editing ? 1 : 0
+        scrollSync.isActive = false
+        modeTransitioning = true
+        if editing { editorMounted = true }
+
+        if reduceMotion {
+            settleMode()
+            let settledGeneration = modeGeneration
+            pendingModeCommit = Task { @MainActor in
+                await Task.yield()
+                guard !Task.isCancelled, modeGeneration == settledGeneration,
+                      state.selectedID == tabID else { return }
+                state.afterModeChange?()
+                pendingModeCommit = nil
+            }
+            return
+        }
+
+        pendingModeCommit = Task { @MainActor in
+            await Task.yield() // Mount the source pane before moving it into view.
+            guard !Task.isCancelled, modeGeneration == generation else { return }
+            withAnimation(.easeInOut(duration: modeDuration)) {
+                animatedModeProgress = target
+            }
+            do { try await Task.sleep(nanoseconds: 300_000_000) }
+            catch { return }
+            guard !Task.isCancelled, modeGeneration == generation,
+                  state.isEditing == editing else { return }
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                editorMounted = editing
+                modeTransitioning = false
+            }
+            scrollSync.isActive = editing
+            if !editing { scrollSync.detachSource() }
+            await Task.yield()
+            guard !Task.isCancelled, modeGeneration == generation,
+                  state.selectedID == tabID else { return }
+            state.afterModeChange?()
+            pendingModeCommit = nil
+        }
+    }
+
+    private func outlineSidebar(onSelect: @escaping (OutlineEntry) -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("目录")
+                .font(.system(size: 13, weight: .semibold))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+            Divider()
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    if state.currentOutline.isEmpty {
+                        Text("此文档没有标题")
+                            .foregroundStyle(.secondary)
+                            .font(.system(size: 12))
+                            .padding(14)
+                    }
+                    ForEach(state.currentOutline) { entry in
+                        Button {
+                            onSelect(entry)
+                        } label: {
+                            Text(entry.title)
+                                .font(.system(size: 12, weight: entry.level == 1 ? .medium : .regular))
+                                .foregroundStyle(.primary)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.leading)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.leading, CGFloat(min(max(entry.level - 1, 0), 4)) * 12)
+                                .padding(.vertical, 7)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 10)
+                    }
+                }
+                .padding(.vertical, 6)
+            }
+        }
+        .frame(width: 220)
+    }
+
+    private var searchBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField("在文档中查找", text: $state.searchQuery)
+                .textFieldStyle(.plain)
+                .focused($searchFocused)
+                .onSubmit { state.moveSearch(by: 1) }
+                .onExitCommand { state.isSearching = false }
+                .frame(maxWidth: 300)
+            Text(state.searchHits.isEmpty ? "0/0" : "\(min(state.searchHitIndex + 1, state.searchHits.count))/\(state.searchHits.count)")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            Button { state.moveSearch(by: -1) } label: { Image(systemName: "chevron.up") }
+                .buttonStyle(.plain)
+                .help("上一个匹配")
+            Button { state.moveSearch(by: 1) } label: { Image(systemName: "chevron.down") }
+                .buttonStyle(.plain)
+                .help("下一个匹配")
+            Button { state.isSearching = false; state.searchQuery = "" } label: {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.plain)
+            .help("关闭查找")
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 34)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 0) {
+                    ForEach(state.tabs) { tab in
+                        HStack(spacing: 5) {
+                            Button { state.selectedID = tab.id } label: {
+                                Text(tab.title + (tab.isDirty ? " ●" : ""))
+                                    .lineLimit(1).truncationMode(.middle)
+                                    .foregroundStyle(state.selectedID == tab.id ? .primary : .secondary)
+                            }
+                            .buttonStyle(.plain)
+                            Button { state.closeTab(tab.id) } label: {
+                                Image(systemName: "xmark").font(.system(size: 9))
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
+                            .help("关闭标签页")
+                        }
+                        .font(.system(size: 13))
+                        .padding(.horizontal, 9)
+                        .frame(height: 30)
+                        .overlay(alignment: .bottom) {
+                            if state.selectedID == tab.id { Rectangle().frame(height: 2) }
+                        }
+                    }
+                    Button { state.newTab() } label: { Image(systemName: "plus") }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12))
+                        .padding(.horizontal, 8)
+                        .help("新建标签页 (⌘T)")
+                }
+            }
+            Divider()
+            if let url = state.currentURL {
+                Text(url.path)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .frame(height: 25)
+                Divider()
+            }
+            if state.isSearching {
+                searchBar
+                Divider()
+            }
+            if state.currentTab?.externalConflict == true {
+                HStack(spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle")
+                    Text("文件已在外部修改。你的编辑仍在，保存前请先另存为。")
+                    Button("另存为…") { state.saveAsCurrent() }
+                    Spacer()
+                }
+                .font(.system(size: 12))
+                .padding(.horizontal, 12)
+                .frame(height: 32)
+                .background(Color.orange.opacity(0.12))
+            }
+            if state.currentURL == nil && state.currentTab?.source.isEmpty != false
+                && !state.isEditing && !editorMounted {
+                VStack(spacing: 14) {
+                    Image(systemName: "doc.text")
+                        .font(.system(size: 44))
+                        .foregroundStyle(.secondary)
+                    Text("打开 Markdown 文件").font(.title2)
+                    Text("按 ⌘O 打开文件，或将 .md 文件拖到窗口中")
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                GeometryReader { splitGeometry in
+                let dividerWidth: CGFloat = 14
+                let availableWidth = max(1, splitGeometry.size.width - dividerWidth)
+                let minimumSource = min(280, availableWidth * 0.45)
+                let minimumPreview = min(360, availableWidth * 0.45)
+                let sourceWidth = min(max(availableWidth * editSplitRatio, minimumSource),
+                                      availableWidth - minimumPreview)
+                let modeInset = sourceWidth + dividerWidth
+                let visibleSourceWidth = animatedModeProgress * sourceWidth
+                let visibleDividerWidth = animatedModeProgress * dividerWidth
+                let previewWidth = max(1, splitGeometry.size.width - animatedModeProgress * modeInset)
+                HStack(spacing: 0) {
+                    if editorMounted, let tabID = state.currentTab?.id {
+                        MarkdownSourceEditor(text: state.currentTab?.source ?? "",
+                                             onChange: {
+                                                 scrollSync.invalidateSource()
+                                                 state.updateSource($0, in: tabID)
+                                             },
+                                             onScrollView: { scrollSync.attachSource($0) },
+                                             onTextApplied: { scrollSync.invalidateSource() })
+                            .id(tabID)
+                            .frame(width: sourceWidth, height: splitGeometry.size.height)
+                            .frame(width: visibleSourceWidth, height: splitGeometry.size.height,
+                                   alignment: .trailing)
+                            .clipped()
+                            .allowsHitTesting(state.isEditing && !modeTransitioning)
+                            .accessibilityHidden(!state.isEditing || modeTransitioning)
+
+                        Rectangle()
+                            .fill(.clear)
+                            .frame(width: visibleDividerWidth, height: splitGeometry.size.height)
+                            .overlay { Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 1) }
+                            .contentShape(Rectangle())
+                            .allowsHitTesting(state.isEditing && !modeTransitioning)
+                            .accessibilityHidden(!state.isEditing || modeTransitioning)
+                            .gesture(DragGesture(minimumDistance: 0)
+                                .onChanged { drag in
+                                    guard !modeTransitioning else { return }
+                                    if editSplitDragStart == nil { editSplitDragStart = editSplitRatio }
+                                    let proposed = (editSplitDragStart ?? editSplitRatio)
+                                        + drag.translation.width / availableWidth
+                                    editSplitRatio = min(max(proposed, minimumSource / availableWidth),
+                                                         1 - minimumPreview / availableWidth)
+                                }
+                                .onEnded { _ in editSplitDragStart = nil })
+                    }
+                    ScrollViewReader { proxy in
+                    GeometryReader { geometry in
+                        let width = geometry.size.width
+                        ZStack(alignment: .topLeading) {
+                            ScrollView {
+                                VStack(alignment: .leading, spacing: state.currentLines == nil ? 14 : 0) {
+                                    if let lines = state.currentLines {
+                                        ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
+                                            styledReadingText(line.isEmpty ? " " : line, size: state.fontSize)
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                                .background(state.activeSearchPath == String(index)
+                                                            ? Color.yellow.opacity(0.16) : Color.clear)
+                                                .id("document:\(index)")
+                                                .previewScrollAnchor(String(index))
+                                        }
+                                    } else {
+                                        ForEach(Array((state.currentDocument.map { Array($0.children) } ?? []).enumerated()), id: \.offset) { index, block in
+                                            MarkdownBlockView(block: block, fontSize: state.fontSize,
+                                                              path: String(index))
+                                                .background(state.activeSearchPath == String(index)
+                                                            ? Color.yellow.opacity(0.16) : Color.clear)
+                                        }
+                                    }
+                                }
+                                .background(ScrollResolver {
+                                    scrollKeeper.scrollView = $0
+                                    scrollSync.attachPreview($0)
+                                }
+                                    .frame(width: 0, height: 0))
+                                .frame(width: textWidth(for: animatedOutlineInset, available: width), alignment: .leading)
+                                .padding(.vertical, 18)
+                                .coordinateSpace(name: "previewContent")
+                                .textSelection(.enabled)
+                                .offset(x: textX(for: animatedOutlineInset, available: width))
+                                .frame(width: width, alignment: .leading)
+                            }
+                            .id(state.selectedID)
+                            .frame(width: width)
+                            .onPreferenceChange(PreviewScrollAnchorKey.self) { anchors in
+                                scrollSync.updateAnchors(anchors,
+                                                         lines: state.currentTab?.scrollLines ?? [:])
+                            }
+
+                            HStack(spacing: 0) {
+                                Divider()
+                                outlineSidebar { entry in
+                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                        proxy.scrollTo("document:\(entry.id)", anchor: .top)
+                                    }
+                                    if state.isEditing {
+                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+                                            scrollSync.alignSourceToPreview()
+                                        }
+                                    }
+                                }
+                            }
+                            .frame(width: outlineWidth, alignment: .leading)
+                            .background(Color(nsColor: .windowBackgroundColor))
+                            .offset(x: width - animatedOutlineInset)
+                            .allowsHitTesting(state.showsOutline)
+                            .accessibilityHidden(!state.showsOutline)
+                        }
+                        .frame(width: width, height: geometry.size.height, alignment: .topLeading)
+                        .clipped()
+                        .task(id: state.navigationRequest?.id) {
+                            guard let request = state.navigationRequest else { return }
+                            await Task.yield()
+                            guard request.tabID == state.selectedID else { return }
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                proxy.scrollTo("document:\(request.path)", anchor: .top)
+                            }
+                            if state.isEditing {
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                                    scrollSync.alignSourceToPreview()
+                                }
+                            }
+                        }
+                    }
+                    .frame(width: previewWidth, height: splitGeometry.size.height)
+                }
+                .frame(width: splitGeometry.size.width, height: splitGeometry.size.height,
+                       alignment: .topLeading)
+                .clipped()
+                }
+            }
+        }
+        }
+        .frame(minWidth: state.isEditing ? 880 : 680, minHeight: 420)
+        .background(WindowChrome(title: state.currentTab?.title ?? "未命名",
+                                 isEditing: state.isEditing,
+                                 showsOutline: state.showsOutline,
+                                 onMode: { state.toggleMode() },
+                                 onOutline: { state.showsOutline.toggle() })
+            .frame(width: 0, height: 0))
+        .environmentObject(state)
+        .environment(\.openURL, OpenURLAction { target in
+            state.followLink(target)
+            return .handled
+        })
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            guard !providers.isEmpty else { return false }
+            for provider in providers {
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    if let url { DispatchQueue.main.async { state.open(url) } }
+                }
+            }
+            return true
+        }
+        .onAppear {
+            settleOutline()
+            settleMode()
+            let keeper = scrollKeeper
+            let reader = state
+            state.beforeReload = { [weak keeper] _ in keeper?.capture() }
+            state.afterReload = { [weak keeper, weak reader] tabID in
+                if reader?.selectedID == tabID { keeper?.restore() }
+            }
+            state.beforeModeChange = { [weak keeper] in keeper?.captureIfNeeded() }
+            state.afterModeChange = { [weak keeper, weak scrollSync] in
+                keeper?.restore()
+                scrollSync?.alignSourceToPreview()
+            }
+        }
+        .onChange(of: state.showsOutline) { transitionOutline(to: $0) }
+        .onChange(of: state.isEditing) { editing in
+            if editing {
+                outlineBeforeEditing = state.showsOutline
+                state.showsOutline = false
+            } else {
+                state.showsOutline = outlineBeforeEditing
+            }
+            transitionMode(to: editing)
+        }
+        .onChange(of: state.selectedID) { _ in
+            settleOutline()
+            settleMode()
+            scrollSync.updateAnchors([:], lines: state.currentTab?.scrollLines ?? [:])
+            scrollKeeper.discard()
+            state.searchHitIndex = 0
+            if state.isEditing {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    scrollSync.alignSourceToPreview()
+                }
+            }
+        }
+        .onChange(of: state.currentTab?.scrollLines) { lines in
+            scrollSync.updateLines(lines ?? [:])
+        }
+        .onChange(of: reduceMotion) { enabled in
+            if enabled && modeTransitioning {
+                settleMode()
+                DispatchQueue.main.async { state.afterModeChange?() }
+            }
+        }
+        .onChange(of: state.isSearching) { active in
+            if active { DispatchQueue.main.async { searchFocused = true } }
+        }
+        .onChange(of: state.searchQuery) { _ in
+            state.searchHitIndex = 0
+            if let first = state.searchHits.first { state.navigate(to: first.path) }
+        }
+        .onDisappear {
+            pendingModeCommit?.cancel()
+            scrollSync.isActive = false
+            scrollSync.detachSource()
+            state.beforeReload = nil
+            state.afterReload = nil
+            state.beforeModeChange = nil
+            state.afterModeChange = nil
+        }
+        .alert("操作失败", isPresented: Binding(
+            get: { state.error != nil },
+            set: { if !$0 { state.error = nil } }
+        )) {
+            Button("好") { state.error = nil }
+        } message: { Text(state.error ?? "") }
+    }
+}
+
+struct MarkdownBlockView: View {
+    @EnvironmentObject private var reader: ReaderState
+    let block: Markup
+    let fontSize: CGFloat
+    let path: String
+
+    private func attributedInline(_ node: Markup, size: CGFloat, strong: Bool = false,
+                                  emphasized: Bool = false, heading: Bool = false) -> AttributedString {
+        if let text = node as? Markdown.Text {
+            var result = AttributedString()
+            var run = ""
+            var runKind: ReadingRun?
+            func fragment(_ value: String, kind: ReadingRun) -> AttributedString {
+                var part = AttributedString(value)
+                part.font = readingFont(for: kind, size: size, strong: strong,
+                                        emphasized: emphasized, heading: heading)
+                part.baselineOffset = readingBaseline(for: kind, size: size, strong: strong,
+                                                      emphasized: emphasized, heading: heading)
+                return part
+            }
+            let characters = Array(text.string)
+            for (index, character) in characters.enumerated() {
+                let kind = readingRun(for: character, previous: runKind,
+                                      next: index + 1 < characters.count ? characters[index + 1] : nil)
+                if let previous = runKind, previous != kind {
+                    result += fragment(run, kind: previous)
+                    run = ""
+                }
+                run.append(character)
+                runKind = kind
+            }
+            if let kind = runKind { result += fragment(run, kind: kind) }
+            return result
+        }
+        if let code = node as? InlineCode {
+            var value = AttributedString(code.code)
+            value.font = .system(size: size * 0.9, design: .monospaced)
+            return value
+        }
+        if node is SoftBreak { return AttributedString(" ") }
+        if node is LineBreak { return AttributedString("\n") }
+        var result = AttributedString()
+        for child in node.children {
+            result += attributedInline(child, size: size,
+                                       strong: strong || node is Strong,
+                                       emphasized: emphasized || node is Emphasis,
+                                       heading: heading)
+        }
+        return result
+    }
+
+    private func inline(_ node: Markup, size: CGFloat? = nil, strong: Bool = false,
+                        emphasized: Bool = false, heading: Bool = false) -> SwiftUI.Text {
+        let pointSize = size ?? fontSize
+        if let text = node as? Markdown.Text {
+            return styledReadingText(text.string, size: pointSize, strong: strong,
+                                     emphasized: emphasized, heading: heading)
+        }
+        if let code = node as? InlineCode {
+            return SwiftUI.Text(code.code).font(.system(size: pointSize * 0.9, design: .monospaced))
+        }
+        if node is SoftBreak { return SwiftUI.Text(" ") }
+        if node is LineBreak { return SwiftUI.Text("\n") }
+        if node is Strong {
+            return node.children.reduce(SwiftUI.Text("")) { $0 + inline($1, size: pointSize, strong: true, emphasized: emphasized, heading: heading) }
+        }
+        if node is Emphasis {
+            return node.children.reduce(SwiftUI.Text("")) { $0 + inline($1, size: pointSize, strong: strong, emphasized: true, heading: heading) }
+        }
+        if node is Strikethrough {
+            return node.children.reduce(SwiftUI.Text("")) { $0 + inline($1, size: pointSize, strong: strong, emphasized: emphasized, heading: heading) }
+                .strikethrough()
+        }
+        var value = SwiftUI.Text("")
+        for child in node.children { value = value + inline(child, size: pointSize, strong: strong, emphasized: emphasized, heading: heading) }
+        if let link = node as? Markdown.Link, let destination = link.destination {
+            var linked = AttributedString()
+            for child in link.children {
+                linked += attributedInline(child, size: pointSize, strong: strong,
+                                           emphasized: emphasized, heading: heading)
+            }
+            if linked.characters.isEmpty { linked = AttributedString(destination) }
+            if let absolute = URL(string: destination), let scheme = absolute.scheme, !scheme.isEmpty {
+                linked.link = absolute
+            } else if let base = reader.currentURL {
+                let beforeFragment = String(destination.split(separator: "#", maxSplits: 1,
+                                                              omittingEmptySubsequences: false)[0])
+                let rawPath = String(beforeFragment.split(separator: "?", maxSplits: 1,
+                                                           omittingEmptySubsequences: false)[0])
+                let decodedPath = rawPath.removingPercentEncoding ?? rawPath
+                let file = decodedPath.isEmpty ? base
+                    : (decodedPath.hasPrefix("/") ? URL(fileURLWithPath: decodedPath)
+                       : base.deletingLastPathComponent().appendingPathComponent(decodedPath).standardizedFileURL)
+                var target = URLComponents(url: file, resolvingAgainstBaseURL: false)
+                let parts = URLComponents(string: destination)
+                target?.fragment = parts?.fragment
+                target?.query = parts?.query
+                linked.link = target?.url ?? file
+            }
+            linked.foregroundColor = .blue
+            return SwiftUI.Text(linked)
+        }
+        return value
+    }
+
+    var body: some View {
+        Group {
+            if let heading = block as? Heading {
+                inline(heading, size: fontSize * (heading.level == 1 ? 1.6 : heading.level == 2 ? 1.5 : 1.25), strong: true, heading: true)
+                    .lineSpacing(3)
+                    .padding(.top, heading.level == 1 ? 0 : 4)
+            } else if let paragraph = block as? Paragraph {
+                inline(paragraph)
+                    .lineSpacing(2)
+            } else if let list = block as? OrderedList {
+                let items = Array(list.children)
+                let lastNumber = Int(list.startIndex) + max(items.count - 1, 0)
+                let markerWidth = ("\(lastNumber)." as NSString)
+                    .size(withAttributes: [.font: systemSerifFont(size: fontSize)]).width
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(Array(items.enumerated()), id: \.offset) { index, item in
+                        HStack(alignment: .firstTextBaseline, spacing: 3) {
+                            Text("\(Int(list.startIndex) + index).")
+                                .font(Font(systemSerifFont(size: fontSize)))
+                                .frame(width: markerWidth, alignment: .leading)
+                            VStack(alignment: .leading, spacing: 6) {
+                                ForEach(Array(item.children.enumerated()), id: \.offset) { childIndex, child in
+                                    MarkdownBlockView(block: child, fontSize: fontSize,
+                                                      path: "\(path).\(index).\(childIndex)")
+                                }
+                            }
+                        }
+                        .previewScrollAnchor("\(path).\(index)")
+                    }
+                }
+                .font(.custom("STSongti-SC-Regular", size: fontSize))
+            } else if let list = block as? UnorderedList {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(Array(list.children.enumerated()), id: \.offset) { index, item in
+                        HStack(alignment: .firstTextBaseline, spacing: 3) {
+                            Text("•").frame(width: fontSize * 0.88, alignment: .leading)
+                            VStack(alignment: .leading, spacing: 6) {
+                                ForEach(Array(item.children.enumerated()), id: \.offset) { childIndex, child in
+                                    MarkdownBlockView(block: child, fontSize: fontSize,
+                                                      path: "\(path).\(index).\(childIndex)")
+                                }
+                            }
+                        }
+                        .previewScrollAnchor("\(path).\(index)")
+                    }
+                }
+                .font(.custom("STSongti-SC-Regular", size: fontSize))
+            } else if let quote = block as? BlockQuote {
+                HStack(alignment: .top, spacing: 15) {
+                    Rectangle().fill(.secondary).frame(width: 3)
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(quote.children.enumerated()), id: \.offset) { index, child in
+                            MarkdownBlockView(block: child, fontSize: fontSize,
+                                              path: "\(path).\(index)")
+                        }
+                    }
+                    .foregroundStyle(.secondary)
+                }
+            } else if let table = block as? Markdown.Table {
+                VStack(spacing: 0) {
+                    tableRow(Array(table.head.cells), header: true)
+                    ForEach(Array(table.body.rows.enumerated()), id: \.offset) { _, row in
+                        tableRow(Array(row.cells), header: false)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+            } else if let code = block as? CodeBlock {
+                ScrollView(.horizontal) {
+                    Text(code.code)
+                        .font(.system(size: fontSize * 0.86, design: .monospaced))
+                        .textSelection(.enabled)
+                        .padding(14)
+                }
+                .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
+            } else if block is ThematicBreak {
+                Divider()
+            } else {
+                Text(block.format())
+                    .font(.custom("STSongti-SC-Regular", size: fontSize))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .id("document:\(path)")
+        .previewScrollAnchor(path)
+    }
+
+    private func tableRow(_ cells: [Markdown.Table.Cell], header: Bool) -> some View {
+        let proportions: [CGFloat] = cells.count == 3 ? [0.19, 0.32, 0.49]
+            : Array(repeating: 1 / CGFloat(max(cells.count, 1)), count: cells.count)
+        return WeightedRowLayout(proportions: proportions) {
+            ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in
+                inline(cell, size: fontSize * 0.9, strong: header)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(minHeight: 42, alignment: .top)
+        .background(header ? Color.primary.opacity(0.05) : Color.clear)
+        .overlay(alignment: .top) { Rectangle().fill(Color.primary.opacity(0.14)).frame(height: 0.5) }
+        .overlay(alignment: .bottom) { Rectangle().fill(Color.primary.opacity(0.14)).frame(height: 0.5) }
+        .overlay(alignment: .leading) { Rectangle().fill(Color.primary.opacity(0.14)).frame(width: 0.5) }
+        .overlay(alignment: .trailing) { Rectangle().fill(Color.primary.opacity(0.14)).frame(width: 0.5) }
+        .overlay {
+            GeometryReader { proxy in
+                Path { path in
+                    var x: CGFloat = 0
+                    for fraction in proportions.dropLast() {
+                        x += proxy.size.width * fraction
+                        path.move(to: CGPoint(x: x, y: 0))
+                        path.addLine(to: CGPoint(x: x, y: proxy.size.height))
+                    }
+                }
+                .stroke(Color.primary.opacity(0.14), lineWidth: 0.5)
+            }
+        }
+    }
+}
+
+struct WeightedRowLayout: Layout {
+    let proportions: [CGFloat]
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let requested = proposal.width ?? 760
+        let width = requested.isFinite ? max(1, requested) : 760
+        let height = subviews.enumerated().map { index, view in
+            let columnWidth = index == subviews.count - 1
+                ? width * (1 - proportions.dropLast().reduce(0, +))
+                : width * proportions[index]
+            return view.sizeThatFits(.init(width: columnWidth, height: nil)).height
+        }.max() ?? 0
+        return CGSize(width: width, height: max(42, height))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX
+        for (index, view) in subviews.enumerated() {
+            let width = index == subviews.count - 1 ? bounds.maxX - x : bounds.width * proportions[index]
+            view.place(at: CGPoint(x: x, y: bounds.minY), anchor: .topLeading,
+                       proposal: .init(width: width, height: bounds.height))
+            x += width
+        }
+    }
+}
+
+@MainActor
+final class LightMDAppDelegate: NSObject, NSApplicationDelegate {
+    weak var reader: ReaderState?
+    private var pendingURLs: [URL] = []
+    private var showWindow: (() -> Void)?
+
+    func attach(_ reader: ReaderState, showWindow: @escaping () -> Void) {
+        self.reader = reader
+        self.showWindow = showWindow
+        let urls = pendingURLs
+        pendingURLs.removeAll()
+        for url in urls { reader.open(url) }
+        if !urls.isEmpty { showWindow() }
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        if let reader {
+            for url in urls { reader.open(url) }
+        } else {
+            pendingURLs.append(contentsOf: urls)
+        }
+        showWindow?()
+        application.activate(ignoringOtherApps: true)
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        DispatchQueue.main.async {
+            let translations = ["File": "文件", "Edit": "编辑", "View": "显示",
+                                "Window": "窗口", "Help": "帮助"]
+            for item in NSApp.mainMenu?.items ?? [] {
+                if let chinese = translations[item.title] {
+                    item.title = chinese
+                    item.submenu?.title = chinese
+                }
+            }
+        }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        reader?.confirmCloseAll() == false ? .terminateCancel : .terminateNow
+    }
+}
+
+private struct MainWindowContent: View {
+    @Environment(\.openWindow) private var openWindow
+    @ObservedObject var reader: ReaderState
+    let appDelegate: LightMDAppDelegate
+
+    var body: some View {
+        ReaderView(state: reader)
+            .onAppear {
+                appDelegate.attach(reader, showWindow: { openWindow(id: "main") })
+            }
+    }
+}
+
+@main
+struct LightMDApp: App {
+    @NSApplicationDelegateAdaptor(LightMDAppDelegate.self) private var appDelegate
+    @StateObject private var reader = ReaderState()
+    init() { NSWindow.allowsAutomaticWindowTabbing = false }
+    var body: some Scene {
+        Window("LightMD", id: "main") {
+            MainWindowContent(reader: reader, appDelegate: appDelegate)
+        }
+            .windowStyle(.hiddenTitleBar)
+            .windowToolbarStyle(.unifiedCompact)
+            .commands {
+                CommandGroup(replacing: .newItem) {
+                    Button("新建标签页") { reader.newTab() }
+                        .keyboardShortcut("t", modifiers: .command)
+                    Button("打开…") { reader.chooseFile() }
+                        .keyboardShortcut("o", modifiers: .command)
+                }
+                CommandGroup(replacing: .saveItem) {
+                    Button("保存") { reader.saveCurrent() }
+                        .keyboardShortcut("s", modifiers: .command)
+                    Button("另存为…") { reader.saveAsCurrent() }
+                        .keyboardShortcut("s", modifiers: [.command, .shift])
+                    Divider()
+                    Button("关闭标签页") { reader.closeTab(reader.selectedID) }
+                        .keyboardShortcut("w", modifiers: .command)
+                }
+                CommandGroup(replacing: .textEditing) {
+                    Button("查找…") { reader.isSearching = true }
+                        .keyboardShortcut("f", modifiers: .command)
+                    Button("查找下一个") { reader.moveSearch(by: 1) }
+                        .keyboardShortcut("g", modifiers: .command)
+                    Button("查找上一个") { reader.moveSearch(by: -1) }
+                        .keyboardShortcut("g", modifiers: [.command, .shift])
+                }
+                CommandGroup(after: .toolbar) {
+                    Button(reader.isEditing ? "阅读模式" : "双栏编辑模式") { reader.toggleMode() }
+                        .keyboardShortcut("e", modifiers: [.command, .shift])
+                    Button("显示或隐藏目录") { reader.showsOutline.toggle() }
+                        .keyboardShortcut("2", modifiers: .command)
+                    Divider()
+                    Button("放大字号") { reader.fontSize = min(32, reader.fontSize + 1) }
+                        .keyboardShortcut("+", modifiers: .command)
+                    Button("缩小字号") { reader.fontSize = max(12, reader.fontSize - 1) }
+                        .keyboardShortcut("-", modifiers: .command)
+                    Button("重置字号") { reader.fontSize = 16 }
+                        .keyboardShortcut("0", modifiers: .command)
+                }
+            }
+    }
+}

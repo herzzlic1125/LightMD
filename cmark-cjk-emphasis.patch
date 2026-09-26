@@ -1,0 +1,61 @@
+diff --git a/src/inlines.c b/src/inlines.c
+index 5fee895d..032ecad6 100644
+--- a/src/inlines.c
++++ b/src/inlines.c
+@@ -424,6 +424,24 @@ static cmark_node *handle_backticks(subject *subj, int options) {
+ }
+ 
+ 
++static bool is_cjk_emphasis_punctuation(int32_t uc) {
++  switch (uc) {
++  case 0x2014: // —
++  case 0x2018: case 0x2019: // ‘ ’
++  case 0x201C: case 0x201D: // “ ”
++  case 0x2026: // …
++  case 0x3001: case 0x3002: // 、 。
++  case 0x3008: case 0x3009: case 0x300A: case 0x300B: // 〈 〉 《 》
++  case 0x300C: case 0x300D: case 0x300E: case 0x300F: // 「 」 『 』
++  case 0x3010: case 0x3011: case 0x3014: case 0x3015: // 【 】 〔 〕
++  case 0xFF01: case 0xFF08: case 0xFF09: case 0xFF0C: // ！ （ ） ，
++  case 0xFF1A: case 0xFF1B: case 0xFF1F: // ： ； ？
++    return true;
++  default:
++    return false;
++  }
++}
++
+ // Scan ***, **, or * and return number scanned, or 0.
+ // Advances position.
+ static int scan_delims(cmark_parser *parser, subject *subj, unsigned char c,
+@@ -489,13 +507,17 @@ static int scan_delims(cmark_parser *parser, subject *subj, unsigned char c,
+                 (!right_flanking || cmark_utf8proc_is_punctuation(before_char));
+     *can_close = right_flanking &&
+                  (!left_flanking || cmark_utf8proc_is_punctuation(after_char));
++    *can_open = *can_open || is_cjk_emphasis_punctuation(after_char);
++    *can_close = *can_close || is_cjk_emphasis_punctuation(before_char);
+   } else if (c == '\'' || c == '"') {
+     *can_open = left_flanking && !right_flanking &&
+ 	         before_char != ']' && before_char != ')';
+     *can_close = right_flanking;
+   } else {
+-    *can_open = left_flanking;
+-    *can_close = right_flanking;
++    *can_open = left_flanking ||
++                (c == '*' && is_cjk_emphasis_punctuation(after_char));
++    *can_close = right_flanking ||
++                 (c == '*' && is_cjk_emphasis_punctuation(before_char));
+   }
+   return numdelims;
+ }
+@@ -1954,6 +1976,11 @@ int cmark_inline_parser_scan_delimiters(cmark_inline_parser *parser,
+   *right_flanking = numdelims > 0 && !cmark_utf8proc_is_space(before_char) &&
+                   !(*punct_before && !space_after && !*punct_after);
+ 
++  if (c == '~') {
++    *left_flanking = *left_flanking || is_cjk_emphasis_punctuation(after_char);
++    *right_flanking = *right_flanking || is_cjk_emphasis_punctuation(before_char);
++  }
++
+   return numdelims;
+ }
+ 
