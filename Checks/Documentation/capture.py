@@ -33,4 +33,10 @@ run('swiftc', *flags, work / 'LightMD-test.swift',
                                'MathMarkup.swift', 'MathRenderer.swift', 'MediaSupport.swift',
                                'WebRenderSupport.swift', 'MermaidSupport.swift', 'PDFExport.swift']],
     root / 'Checks/Documentation/CaptureReading.swift', *objects, '-o', work / 'capture-reading')
-run(work / 'capture-reading', root / 'docs/examples/reading.md', root / 'docs/images/reading.png')
+for language, kind, formulas, height in [
+    ('en', 'type', 0, 660), ('en', 'math', 3, 740),
+    ('zh', 'type', 0, 660), ('zh', 'math', 3, 740),
+]:
+    run(work / 'capture-reading',
+        root / f'docs/examples/reading-{language}-{kind}.md',
+        root / f'docs/images/reading-{language}-{kind}.png', formulas, height)

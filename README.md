@@ -16,10 +16,20 @@ This is a reader I made for my own daily use, with features and typography chose
 
 ## Reading preview
 
+### Typography and spacing
+
 <p align="center">
-  <img src="docs/images/reading.png" width="960" alt="LightMD native reading view showing English and Chinese typography, paragraph spacing, inline math, and two display equations">
+  <img src="docs/images/reading-en-type.png" width="960" alt="English typography, heading hierarchy, line width, paragraph spacing and emphasis in LightMD">
   <br>
-  <sub>Captured offscreen from LightMD's native reading view at 20 pt, using <a href="docs/examples/reading.md">this sample Markdown</a>. The image shows text spacing and actual LaTeX rendering.</sub>
+  <sub>Native reading view at 20 pt · <a href="docs/examples/reading-en-type.md">sample Markdown</a></sub>
+</p>
+
+### LaTeX in context
+
+<p align="center">
+  <img src="docs/images/reading-en-math.png" width="960" alt="English prose with inline mathematics and two displayed LaTeX equations in LightMD">
+  <br>
+  <sub>Native math rendering at 20 pt · <a href="docs/examples/reading-en-math.md">sample Markdown</a></sub>
 </p>
 
 ## What it does

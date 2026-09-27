@@ -8,6 +8,8 @@ import Foundation
         NSApp.setActivationPolicy(.prohibited)
         let sample = URL(fileURLWithPath: CommandLine.arguments[1])
         let output = URL(fileURLWithPath: CommandLine.arguments[2])
+        let expectedFormulaCount = Int(CommandLine.arguments[3])!
+        let contentHeight = CGFloat(Double(CommandLine.arguments[4])!)
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("LightMD-Readme-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temporary) }
@@ -20,7 +22,7 @@ import Foundation
         state.tabs[0].savedSource = source
         setbuf(stdout, nil)
         let host = NSHostingView(rootView: ReaderView(state: state).environment(\.colorScheme, .light))
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 920),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: contentHeight),
                               styleMask: [.titled, .resizable, .closable, .miniaturizable],
                               backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
@@ -32,10 +34,12 @@ import Foundation
             host.layoutSubtreeIfNeeded()
             window.displayIfNeeded()
             RunLoop.main.run(until: Date().addingTimeInterval(0.03))
-            if state.currentMathTokens.count == 3 && state.formulas.revision >= 3 { break }
+            if state.currentDocument != nil && state.currentMathTokens.count == expectedFormulaCount
+                && state.formulas.revision >= expectedFormulaCount { break }
         }
         print("Formula tokens=\(state.currentMathTokens.count), rendered=\(state.formulas.revision)")
-        precondition(state.formulas.revision >= 3, "Formulas did not finish rendering")
+        precondition(state.currentDocument != nil && state.currentMathTokens.count == expectedFormulaCount
+            && state.formulas.revision >= expectedFormulaCount, "Preview did not finish rendering")
         for _ in 0..<12 { host.layoutSubtreeIfNeeded(); RunLoop.main.run(until: Date().addingTimeInterval(0.025)) }
         // Capture the native document region from the composited frame view.
         // The titlebar accessory sits outside this region in an offscreen window.
@@ -53,6 +57,6 @@ import Foundation
         try png.write(to: output, options: .atomic)
         precondition(!window.isVisible)
         precondition(NSWorkspace.shared.frontmostApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier)
-        print("Native reader capture: \(bitmap.pixelsWide) × \(bitmap.pixelsHigh), 20 pt, 3 rendered formulas; no visible window")
+        print("Native reader capture: \(bitmap.pixelsWide) × \(bitmap.pixelsHigh), 20 pt, \(expectedFormulaCount) rendered formulas; no visible window")
     }
 }
