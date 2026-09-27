@@ -1,5 +1,7 @@
 # LightMD
 
+<img src="Assets/LightMDIcon.png" width="112" alt="LightMD 图标">
+
 一个为个人日常使用而制作的 macOS Markdown 阅读器，也提供简单的编辑功能。
 
 LightMD 的排版、交互和功能选择，主要按照我自己的阅读习惯与个人喜好来实现。把它公开，是希望有类似需求的人也能用上，并一起让它变得更顺手。
@@ -49,9 +51,9 @@ flowchart LR
 
 ## 从源码构建
 
-当前发布源码，不附带应用图标或预编译安装包。
+当前发布源码和为本项目生成的纸张字标图标，暂不提供预编译安装包。
 
-要求：macOS 13 或更新版本，以及提供 Swift 工具链和 macOS SDK 的开发工具。开发和验证以 Apple silicon 为主；旧系统及 Intel Mac 尚未完成验证。首次构建需要联网下载固定版本依赖，运行时的公式和图表资源随应用打包。
+运行最低配置为 macOS 13。构建需要 Swift 6.0 或更新的工具链及 macOS SDK。开发和验证以 Apple silicon 为主；旧系统及 Intel Mac 尚未完成验证。首次构建需要联网下载固定版本依赖，运行时的公式和图表资源随应用打包。
 
 ```sh
 git clone https://github.com/herzzlic1125/LightMD.git
@@ -91,7 +93,7 @@ python3 Checks/Features/check-preview.py
 
 欢迎提交 Issue 或 Pull Request。问题反馈请附上系统版本、复现步骤和不包含私人信息的最小 Markdown 示例；涉及排版时可以附截图。详细说明见 [贡献指南](CONTRIBUTING.md)。
 
-[更改记录](docs/CHANGELOG.md) · [字体说明](Font-notes.md) · [验证记录](docs/EXPORT-0.17.0.md)
+[图标说明](docs/ICON.md) · [更改记录](docs/CHANGELOG.md) · [字体说明](Font-notes.md) · [验证记录](docs/EXPORT-0.17.0.md)
 
 ## 许可与依赖
 

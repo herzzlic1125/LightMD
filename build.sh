@@ -102,6 +102,14 @@ mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources/zh-Hans.lproj"
 cp .build/release/LightMD "$bundle/Contents/MacOS/LightMD"
 cp Info.plist "$bundle/Contents/Info.plist"
 cp zh-Hans.lproj/Localizable.strings "$bundle/Contents/Resources/zh-Hans.lproj/Localizable.strings"
+iconset="$package_work/LightMDIcon.iconset"
+mkdir -p "$iconset"
+for size in 16 32 128 256 512; do
+  sips -z "$size" "$size" Assets/LightMDIcon.png --out "$iconset/icon_${size}x${size}.png" >/dev/null
+  doubled=$(( size * 2 ))
+  sips -z "$doubled" "$doubled" Assets/LightMDIcon.png --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns "$iconset" -o "$bundle/Contents/Resources/LightMDIcon.icns"
 ditto Assets/Mermaid "$bundle/Contents/Resources/Mermaid"
 ditto .build/release/MathJaxSwift_MathJaxSwift.bundle "$bundle/Contents/Resources/MathJaxSwift_MathJaxSwift.bundle"
 mkdir -p "$bundle/Contents/Resources/Licenses"

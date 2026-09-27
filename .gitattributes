@@ -1,2 +1,5 @@
 # Preserve upstream whitespace inside vendored JavaScript template strings.
 Assets/Mermaid/mermaid.tiny.js -whitespace linguist-vendored=true
+
+# Keep upstream license and notice files verbatim.
+docs/licenses/* -whitespace

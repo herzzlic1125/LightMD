@@ -24,7 +24,7 @@
 - 执行 ./build.sh 完成补丁、解析检查、Release 构建、资源打包与签名。默认不安装。
 - 只有明确需要安装时使用 ./build.sh --install；不得替换运行中的应用、强制结束或丢弃编辑。
 - 应用代码变化时更新 Info.plist 版本；发布源码和安装包前核对资源许可。
-- 公共仓库不包含个人图标资源。构建产物从全新目录打包，避免混入旧资源。
+- 公共仓库使用 Assets/LightMDIcon.png 中的纸张字标图标，不包含个人图像素材。构建产物从全新目录打包，避免混入旧资源。
 - 涉及公式、图片、会话、图表或 PDF 时，运行 python3 Checks/Features/run.py。
 - 保持固定解析器和公式资源补丁；数字规则由 FormulaConfiguration 设置，防止误吞运算符。
 - WebKit 打印采用 canSpawnSeparateThread 和异步 runModal；主线程同步 run() 无法等待完整页数。
