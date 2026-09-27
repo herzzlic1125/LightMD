@@ -2,3 +2,6 @@
 .DS_Store
 LightMD.app/
 LightMD_副本.app/
+
+# Optional local artwork is not part of the source distribution.
+Assets/AppIcon*

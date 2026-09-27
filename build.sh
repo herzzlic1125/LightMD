@@ -2,6 +2,17 @@
 set -euo pipefail
 
 cd "${0:A:h}"
+install_requested=false
+if (( $# > 1 )); then
+  print -u2 "Usage: ./build.sh [--install]"
+  exit 2
+fi
+case "${1:-}" in
+  "") ;;
+  --install) install_requested=true ;;
+  --help|-h) print "Usage: ./build.sh [--install]"; exit 0 ;;
+  *) print -u2 "Usage: ./build.sh [--install]"; exit 2 ;;
+esac
 swift package resolve
 
 checkout="$PWD/.build/checkouts/swift-cmark"
@@ -42,32 +53,51 @@ fi
 
 swift run -c release CJKParserCheck
 swift build -c release --product LightMD
-bundle="$PWD/LightMD.app"
+output_bundle="$PWD/LightMD.app"
 installed_bundle="/Applications/LightMD.app"
 bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' Info.plist)"
-if pgrep -f "$bundle/Contents/MacOS/LightMD$" >/dev/null; then
-  print -u2 "Quit this LightMD.app before replacing its executable."
-  exit 1
-fi
-if [[ -e "$installed_bundle" || -L "$installed_bundle" ]]; then
-  if [[ ! -d "$installed_bundle" || -L "$installed_bundle" ]]; then
-    print -u2 "$installed_bundle is not an app directory; refusing to replace it."
+for target in "$output_bundle"; do
+  if [[ -e "$target" && ( ! -d "$target" || -L "$target" ) ]]; then
+    print -u2 "$target is not a regular app directory."
     exit 1
   fi
-  installed_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$installed_bundle/Contents/Info.plist")"
-  if [[ "$installed_id" != "$bundle_id" ]]; then
-    print -u2 "$installed_bundle has bundle ID $installed_id; expected $bundle_id."
+  if pgrep -f "$target/Contents/MacOS/LightMD$" >/dev/null; then
+    print -u2 "Quit $target before replacing it."
     exit 1
   fi
-  if pgrep -f "$installed_bundle/Contents/MacOS/LightMD$" >/dev/null; then
-    print -u2 "Quit the LightMD installed in /Applications before updating it."
-    exit 1
-  fi
+done
+if $install_requested; then
   if [[ ! -w /Applications ]]; then
-    print -u2 "/Applications is not writable; cannot update the installed LightMD."
+    print -u2 "/Applications is not writable."
     exit 1
   fi
+  if [[ -e "$installed_bundle" || -L "$installed_bundle" ]]; then
+    if [[ ! -d "$installed_bundle" || -L "$installed_bundle" ]]; then
+      print -u2 "$installed_bundle is not a regular app directory."
+      exit 1
+    fi
+    installed_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$installed_bundle/Contents/Info.plist")"
+    if [[ "$installed_id" != "$bundle_id" ]]; then
+      print -u2 "Installed bundle identifier does not match."
+      exit 1
+    fi
+    if pgrep -f "$installed_bundle/Contents/MacOS/LightMD$" >/dev/null; then
+      print -u2 "Quit the installed LightMD before updating it."
+      exit 1
+    fi
+  fi
 fi
+
+package_work="$(mktemp -d "$PWD/.build/LightMD-package.XXXXXX")"
+bundle="$package_work/LightMD.app"
+cleanup_package() {
+  if [[ -d "$package_work/previous.app" ]]; then
+    print -u2 "Previous build retained at $package_work/previous.app."
+  else
+    rm -rf "$package_work"
+  fi
+}
+trap cleanup_package EXIT
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources/zh-Hans.lproj"
 cp .build/release/LightMD "$bundle/Contents/MacOS/LightMD"
 cp Info.plist "$bundle/Contents/Info.plist"
@@ -75,13 +105,26 @@ cp zh-Hans.lproj/Localizable.strings "$bundle/Contents/Resources/zh-Hans.lproj/L
 ditto Assets/Mermaid "$bundle/Contents/Resources/Mermaid"
 ditto .build/release/MathJaxSwift_MathJaxSwift.bundle "$bundle/Contents/Resources/MathJaxSwift_MathJaxSwift.bundle"
 mkdir -p "$bundle/Contents/Resources/Licenses"
-install -m 644 .build/checkouts/mathjaxswift/LICENSE.md "$bundle/Contents/Resources/Licenses/MathJaxSwift.txt"
-install -m 644 .build/checkouts/SwiftDraw/LICENSE.txt "$bundle/Contents/Resources/Licenses/SwiftDraw.txt"
+for notice in docs/licenses/*; do
+  install -m 644 "$notice" "$bundle/Contents/Resources/Licenses/${notice:t}"
+done
+install -m 644 LICENSE "$bundle/Contents/Resources/Licenses/LightMD-LICENSE.txt"
+install -m 644 ThirdPartyNotices.md "$bundle/Contents/Resources/Licenses/ThirdPartyNotices.md"
 codesign --force --deep --sign - "$bundle"
 codesign --verify --deep --strict "$bundle"
-print "Built $bundle with CJK Markdown emphasis support."
+if [[ -d "$output_bundle" ]]; then
+  mv "$output_bundle" "$package_work/previous.app"
+fi
+if ! mv "$bundle" "$output_bundle"; then
+  [[ ! -d "$package_work/previous.app" ]] || mv "$package_work/previous.app" "$output_bundle"
+  exit 1
+fi
+rm -rf "$package_work/previous.app"
+cleanup_package
+trap - EXIT
+print "Built $output_bundle."
 
-if [[ -d "$installed_bundle" ]]; then
+if $install_requested; then
   install_work="$(mktemp -d /Applications/.LightMD-install.XXXXXX)"
   cleanup_install() {
     if [[ -d "$install_work/previous.app" ]]; then
@@ -91,30 +134,30 @@ if [[ -d "$installed_bundle" ]]; then
     fi
   }
   trap cleanup_install EXIT
-  ditto "$bundle" "$install_work/new.app"
+  ditto "$output_bundle" "$install_work/new.app"
   codesign --verify --deep --strict "$install_work/new.app"
-  staged_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$install_work/new.app/Contents/Info.plist")"
-  if [[ "$staged_id" != "$bundle_id" ]]; then
-    print -u2 "Staged app bundle ID changed; refusing to install it."
-    exit 1
-  fi
   if pgrep -f "$installed_bundle/Contents/MacOS/LightMD$" >/dev/null; then
     print -u2 "The installed LightMD started during the build; close it before updating."
     exit 1
   fi
-  mv "$installed_bundle" "$install_work/previous.app"
+  if [[ -d "$installed_bundle" ]]; then
+    current_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$installed_bundle/Contents/Info.plist")"
+    if [[ "$current_id" != "$bundle_id" ]]; then
+      print -u2 "Installed bundle identifier changed during the build."
+      exit 1
+    fi
+    mv "$installed_bundle" "$install_work/previous.app"
+  fi
   if ! mv "$install_work/new.app" "$installed_bundle"; then
-    mv "$install_work/previous.app" "$installed_bundle"
-    print -u2 "Install failed; restored the previous LightMD.app."
+    [[ ! -d "$install_work/previous.app" ]] || mv "$install_work/previous.app" "$installed_bundle"
     exit 1
   fi
   if ! codesign --verify --deep --strict "$installed_bundle"; then
     mv "$installed_bundle" "$install_work/failed.app"
-    mv "$install_work/previous.app" "$installed_bundle"
-    print -u2 "Installed app failed signature verification; restored the previous LightMD.app."
+    [[ ! -d "$install_work/previous.app" ]] || mv "$install_work/previous.app" "$installed_bundle"
     exit 1
   fi
   /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$installed_bundle"
   rm -rf "$install_work/previous.app"
-  print "Updated $installed_bundle."
+  print "Installed $installed_bundle."
 fi
