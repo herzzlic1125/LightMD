@@ -1,59 +1,60 @@
-# LightMD
+<div align="center">
+  <img src="Assets/LightMDIcon.png" width="116" alt="LightMD icon">
+  <h1>LightMD</h1>
+  <p>A personal Markdown reader for macOS, shaped by my reading habits and taste.</p>
+  <p><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a></p>
+</div>
 
-<img src="Assets/LightMDIcon.png" width="112" alt="LightMD 图标">
+## Why I made it
 
-一个为个人日常使用而制作的 macOS Markdown 阅读器，也提供简单的编辑功能。
+LightMD began with two goals:
 
-LightMD 的排版、交互和功能选择，主要按照我自己的阅读习惯与个人喜好来实现。把它公开，是希望有类似需求的人也能用上，并一起让它变得更顺手。
+1. **Make Markdown more pleasant to read.** Give Chinese and English text a clear visual rhythm, comfortable spacing, and mathematics that belongs on the page.
+2. **Keep power use on macOS in mind.** Render visible content on demand, combine rapid edits before updating the preview, and cache expensive results.
 
-**欢迎大家提出优化意见、反馈问题，或提交改进。** 无论是阅读体验、中文排版、长文性能，还是某个不顺手的小细节，都欢迎在 Issues 中讨论。项目由个人维护，功能取舍和更新节奏会结合实际使用需求与可投入的时间。
+This is a reader I made for my own daily use, with features and typography chosen around my preferences. I hope it is useful to others too. Suggestions about readability, performance, or small points of friction are welcome in [Issues](https://github.com/herzzlic1125/LightMD/issues). Power efficiency is a design goal; battery impact has not yet been measured across different Macs.
 
-## 功能
+## Reading preview
 
-- 多标签阅读 Markdown，支持 Finder 打开、拖入文件和本地文档链接。
-- 阅读模式与双栏编辑模式，左右宽度可拖动调整，按内容位置同步滚动。
-- 中文排版、列表、表格、代码、搜索和标题目录。
-- 已有路径的文件停止输入约 1 秒后自动保存，保留外部修改冲突检查。
-- 恢复标签、阅读位置和未命名草稿。
-- 离线 LaTeX 数学公式，支持行内及块级公式。
-- 本地／相对路径图片，点击查看原图。
-- 离线 Mermaid 流程图及常见时序图。
-- 导出完整 A4 PDF，包含正文、表格、公式、图片和图表。
-- 系统明暗外观和“减少动态效果”。
+<p align="center">
+  <img src="docs/images/reading.png" width="960" alt="LightMD native reading view showing English and Chinese typography, paragraph spacing, inline math, and two display equations">
+  <br>
+  <sub>Captured offscreen from LightMD's native reading view at 20 pt, using <a href="docs/examples/reading.md">this sample Markdown</a>. The image shows text spacing and actual LaTeX rendering.</sub>
+</p>
 
-## 使用
+## What it does
 
-| 操作 | 入口 |
+- Read multiple Markdown files in one window, including files opened from Finder, dropped into the window, or reached through local document links.
+- Switch between reading and a two-pane editor. Drag the divider to resize both panes; scroll positions follow corresponding content.
+- Read headings, lists, tables, code, and local images with search and a heading outline.
+- Render inline and display LaTeX mathematics offline.
+- Save named files automatically after a short pause. Detect outside changes and preserve conflicting drafts.
+- Restore tabs, the selected file, reading positions, and untitled drafts.
+- Export the entire document as an A4 PDF, including text, mathematics, and images.
+- Follow the system's light and dark appearance and Reduce Motion setting.
+
+## Shortcuts
+
+| Action | Shortcut |
 | --- | --- |
-| 打开文件 | ⌘O，或拖入文件 |
-| 新建标签 | ⌘T |
-| 保存／另存为 | ⌘S／⇧⌘S |
-| 切换阅读和编辑模式 | 右上角中间按钮，或 ⇧⌘E |
-| 显示／隐藏目录 | 右上角右侧按钮，或 ⌘2 |
-| 查找 | ⌘F |
-| 导出 PDF | 右上角左侧按钮，或 ⌥⌘E |
-| 调整字号 | ⌘+、⌘−、⌘0 |
+| Open files | ⌘O, or drop files into the window |
+| New tab | ⌘T |
+| Save / Save As | ⌘S / ⇧⌘S |
+| Switch reading and editing modes | ⇧⌘E, or the middle button at the upper right |
+| Show or hide the outline | ⌘2, or the right button at the upper right |
+| Find | ⌘F |
+| Export PDF | ⌥⌘E, or the left button at the upper right |
+| Change text size | ⌘+ / ⌘− / ⌘0 |
 
-第一次进入双栏时，源码和预览默认占 40%／60%。拖动分隔线时两侧都会实时换行。
+The first two-pane view starts at 40% source and 60% preview. Both sides reflow while you drag the divider. A new untitled file needs a location on its first save. When a file changes outside LightMD, the app preserves your draft and offers Save As rather than overwriting that change. Session data is stored at `~/Library/Application Support/LightMD/session.json`.
 
-未命名文件首次保存需要选择位置；已有路径的文件自动保存。如果文件在外部被修改，应用会保留草稿并提示冲突，可另存为副本。会话与草稿保存在 `~/Library/Application Support/LightMD/session.json`。
+Mathematics supports `$…$`, `$$…$$`, `\(…\)`, and `\[…\]`. Failed expressions remain visible as source.
 
-公式支持 `$…$`、`$$…$$`、`\(…\)` 和 `\[…\]`。Mermaid 使用标记为 `mermaid` 的代码围栏：
+## Build from source
 
-````markdown
-```mermaid
-flowchart LR
-    A[开始] --> B{检查通过?}
-    B -->|是| C[完成]
-    B -->|否| A
-```
-````
+The repository includes the source and its paper-and-bookmark icon. It does not provide a precompiled application.
 
-## 从源码构建
-
-当前发布源码和为本项目生成的纸张字标图标，暂不提供预编译安装包。
-
-运行最低配置为 macOS 13。构建需要 Swift 6.0 或更新的工具链及 macOS SDK。开发和验证以 Apple silicon 为主；旧系统及 Intel Mac 尚未完成验证。首次构建需要联网下载固定版本依赖，运行时的公式和图表资源随应用打包。
+The minimum configured runtime is macOS 13. Building requires a Swift 6.0 or newer toolchain and a macOS SDK. Development and verification have mainly used Apple silicon; older systems and Intel Macs have not yet been fully checked. The first build needs network access for pinned dependencies. Runtime math resources are bundled into the app.
 
 ```sh
 git clone https://github.com/herzzlic1125/LightMD.git
@@ -61,40 +62,25 @@ cd LightMD
 ./build.sh
 ```
 
-默认只生成项目目录下的 `LightMD.app`，不会修改 `/Applications` 中的应用。需要安装时，先正常退出正在运行的 LightMD，再执行：
+By default, the script builds and signs `LightMD.app` in this directory. To also install it in `/Applications`, quit a running copy normally and run `./build.sh --install`. The ad hoc signature is not notarization, so macOS may ask you to confirm opening the app in Privacy & Security.
 
-```sh
-./build.sh --install
-```
-
-构建脚本会核对依赖版本、应用项目补丁、执行 18 个 Markdown 解析检查，随后打包并进行本地临时签名。构建产物未经开发者公证，系统可能要求你在隐私与安全性设置中确认打开。
-
-## 验证与预览
+## Checks and scope
 
 ```sh
 python3 Checks/Features/run.py
 python3 Checks/Features/check-preview.py
 ```
 
-前者进行离屏功能检查，包括公式、图片、草稿、图表与 PDF；后者检查 HTML 结构和 JavaScript，需要本机提供 Node.js。测试使用隔离文件，不读写个人会话，不显示或置顶测试窗口。
+The first command runs isolated, offscreen checks for rendering, editing, recovery, and PDF export. The second checks the standalone HTML preview and requires Node.js. Neither test displays or activates a window. `LightMD-preview.html` uses example content and browser storage; it does not write to Markdown files.
 
-`LightMD-preview.html` 是独立的交互预览，可以自行在浏览器中打开。它使用示例数据和浏览器本地存储，不会写回本地 Markdown；公式为代表样例，原生应用支持的公式范围更广。
+Current limits: network images are not loaded; animated images show their first frame; PDF uses A4 with fixed margins. A very long individual content block may still have a small scroll alignment offset between panes. Feedback on readability, battery use, and hardware compatibility is especially helpful.
 
-## 当前边界
+## Contribute
 
-- 图片以本地文件为主，暂不加载网络图片；动图显示首帧。
-- Mermaid 使用官方 Tiny 版本，不包含架构图、思维导图、ELK 布局或图内 KaTeX。
-- PDF 固定 A4 与约 12.7 mm 边距，暂无纸型及页眉页脚设置。
-- 特别长的单个内容块，两侧滚动位置仍可能有少量偏移。
-- 不支持的公式和图表会保留源码并提示。
-- 节能和多机型兼容性仍有继续完善的空间。
+Issues and pull requests are welcome. For a bug, include the macOS and LightMD versions, steps to reproduce it, and a small Markdown example with private information removed. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## 参与改进
+[Icon design](docs/ICON.md) · [Changelog](docs/CHANGELOG.md) · [Typography notes](Font-notes.md) · [Validation notes](docs/PUBLICATION-0.17.1.md)
 
-欢迎提交 Issue 或 Pull Request。问题反馈请附上系统版本、复现步骤和不包含私人信息的最小 Markdown 示例；涉及排版时可以附截图。详细说明见 [贡献指南](CONTRIBUTING.md)。
+## License
 
-[图标说明](docs/ICON.md) · [更改记录](docs/CHANGELOG.md) · [字体说明](Font-notes.md) · [验证记录](docs/EXPORT-0.17.0.md)
-
-## 许可与依赖
-
-本项目原创代码和文档采用 [MIT License](LICENSE)，允许使用、修改和商用，分发时请保留版权及许可声明。第三方组件仍遵循各自的许可证，见 [第三方许可说明](ThirdPartyNotices.md)。
+Original project code and documentation are available under the [MIT License](LICENSE). Third-party components keep their own licenses; see [ThirdPartyNotices.md](ThirdPartyNotices.md).
