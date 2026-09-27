@@ -29,6 +29,7 @@ struct MarkdownSourceEditor: NSViewRepresentable {
         scroll.borderType = .noBorder
 
         let editor = NSTextView(frame: .zero)
+        editor.layoutManager?.allowsNonContiguousLayout = true
         editor.isRichText = false
         editor.importsGraphics = false
         editor.isEditable = true
@@ -228,27 +229,15 @@ final class ScrollSyncController {
     private var regions: [SourceRegion] = []
     private var regionsByPath: [String: SourceRegion] = [:]
     private(set) var isResizing = false
-    private weak var resizingEditor: NSTextView?
-    private var previousWidthTracking = true
     var isActive = false
 
     func beginDividerResize() {
         guard !isResizing else { return }
         isResizing = true
-        resizingEditor = source?.documentView as? NSTextView
-        previousWidthTracking = resizingEditor?.textContainer?.widthTracksTextView ?? true
-        resizingEditor?.textContainer?.widthTracksTextView = false
     }
 
     func endDividerResize() {
         guard isResizing else { return }
-        if let editor = resizingEditor, let container = editor.textContainer {
-            container.widthTracksTextView = previousWidthTracking
-            if previousWidthTracking {
-                container.containerSize.width = max(1, editor.bounds.width - editor.textContainerInset.width * 2)
-            }
-        }
-        resizingEditor = nil
         invalidateSource()
         isResizing = false
     }

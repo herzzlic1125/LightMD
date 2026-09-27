@@ -134,6 +134,7 @@ struct ReaderTab: Identifiable {
     var externalConflict: Bool
     var editRevision: UInt64
     var previewID: UUID
+    var autoSaveError: String?
 
     init(id: UUID = UUID(), url: URL? = nil, source: String = "", document: Document? = nil,
          outline: [OutlineEntry] = [], index: [IndexedBlock] = [], plainLines: [String]? = nil,
@@ -156,6 +157,7 @@ struct ReaderTab: Identifiable {
         self.externalConflict = externalConflict
         self.editRevision = editRevision
         self.previewID = previewID
+        self.autoSaveError = nil
     }
 
     var title: String { url?.lastPathComponent ?? "未命名" }
@@ -178,6 +180,7 @@ final class ReaderState: ObservableObject {
     private var fileTimer: Timer?
     private var pendingRefresh: [UUID: Task<Void, Never>] = [:]
     private var pendingParse: [UUID: Task<Void, Never>] = [:]
+    private var pendingAutoSave: [UUID: Task<Void, Never>] = [:]
     var beforeReload: ((UUID) -> Void)?
     var afterReload: ((UUID) -> Void)?
     var beforeModeChange: (() -> Void)?
@@ -392,6 +395,7 @@ final class ReaderState: ObservableObject {
         guard let index = tabs.firstIndex(where: { $0.id == tabID }),
               !sameSourceBytes(tabs[index].source, source) else { return }
         tabs[index].source = source
+        if !tabs[index].isDirty { tabs[index].autoSaveError = nil }
         tabs[index].editRevision &+= 1
         let revision = tabs[index].editRevision
         pendingParse[tabID]?.cancel()
@@ -399,6 +403,18 @@ final class ReaderState: ObservableObject {
             do { try await Task.sleep(nanoseconds: 180_000_000) }
             catch { return }
             self?.publishPreview(for: tabID, revision: revision)
+        }
+        pendingAutoSave[tabID]?.cancel()
+        pendingAutoSave[tabID] = nil
+        guard tabs[index].url != nil, tabs[index].isDirty, !tabs[index].externalConflict else { return }
+        pendingAutoSave[tabID] = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: 1_000_000_000) }
+            catch { return }
+            guard let self, let tab = self.tabs.first(where: { $0.id == tabID }),
+                  tab.editRevision == revision else { return }
+            self.pendingAutoSave[tabID] = nil
+            guard tab.isDirty, !tab.externalConflict, let url = tab.url else { return }
+            _ = self.write(tabID: tabID, to: url, saveAs: false, automatic: true)
         }
     }
 
@@ -450,13 +466,19 @@ final class ReaderState: ObservableObject {
         return write(tabID: tabID, to: url, saveAs: true)
     }
 
-    private func write(tabID: UUID, to url: URL, saveAs: Bool) -> Bool {
+    private func saveFailure(_ message: String, at index: Int, automatic: Bool) {
+        if automatic { tabs[index].autoSaveError = message }
+        else { error = message }
+    }
+
+    private func write(tabID: UUID, to url: URL, saveAs: Bool, automatic: Bool = false) -> Bool {
         guard let index = tabs.firstIndex(where: { $0.id == tabID }) else { return false }
         let tab = tabs[index]
         if !saveAs, let baseline = tab.savedData {
             guard let disk = try? Data(contentsOf: url), disk == baseline else {
                 tabs[index].externalConflict = true
-                error = "文件已在外部修改，当前编辑尚未覆盖磁盘版本。请使用「另存为…」保存副本。"
+                saveFailure("文件已在外部修改或无法读取，当前编辑尚未覆盖磁盘版本。请使用「另存为…」保存副本。",
+                            at: index, automatic: automatic)
                 return false
             }
         }
@@ -467,7 +489,8 @@ final class ReaderState: ObservableObject {
             data = tab.source.data(using: .utf8)
         }
         guard let data else {
-            error = "当前编码无法保存新增字符。请用「另存为…」保存 UTF-8 副本。"
+            saveFailure("当前编码无法保存新增字符。请用「另存为…」保存 UTF-8 副本。",
+                        at: index, automatic: automatic)
             return false
         }
         do {
@@ -478,12 +501,18 @@ final class ReaderState: ObservableObject {
             tabs[index].stamp = Self.stamp(for: url)
             tabs[index].encodingName = encoding
             tabs[index].externalConflict = false
-            pendingParse[tabID]?.cancel()
-            publishPreview(for: tabID, revision: tab.editRevision)
-            error = nil
+            tabs[index].autoSaveError = nil
+            pendingAutoSave[tabID]?.cancel()
+            pendingAutoSave[tabID] = nil
+            if pendingParse[tabID] != nil || saveAs {
+                pendingParse[tabID]?.cancel()
+                publishPreview(for: tabID, revision: tab.editRevision)
+            }
+            if !automatic { error = nil }
             return true
         } catch {
-            self.error = "无法保存文件：\(url.path)\n\(error.localizedDescription)"
+            saveFailure("无法保存文件：\(url.path)\n\(error.localizedDescription)",
+                        at: index, automatic: automatic)
             return false
         }
     }
@@ -512,6 +541,7 @@ final class ReaderState: ObservableObject {
                 tabs[index].savedData = data
                 tabs[index].stamp = stamp
                 tabs[index].externalConflict = false
+                tabs[index].autoSaveError = nil
             } else if tabs[index].savedData == data {
                 tabs[index].stamp = stamp
             } else {
@@ -542,6 +572,8 @@ final class ReaderState: ObservableObject {
 
     private func confirmDiscardChanges(in tabID: UUID) -> Bool {
         guard let tab = tabs.first(where: { $0.id == tabID }), tab.isDirty else { return true }
+        if let url = tab.url, !tab.externalConflict,
+           write(tabID: tabID, to: url, saveAs: false, automatic: true) { return true }
         let alert = NSAlert()
         alert.messageText = "保存对「\(tab.title)」的修改吗？"
         alert.informativeText = "未保存的编辑内容将丢失。"
@@ -569,6 +601,8 @@ final class ReaderState: ObservableObject {
         pendingParse[id] = nil
         pendingRefresh[id]?.cancel()
         pendingRefresh[id] = nil
+        pendingAutoSave[id]?.cancel()
+        pendingAutoSave[id] = nil
         if tabs.count == 1 {
             tabs[0] = ReaderTab()
             selectedID = tabs[0].id
@@ -777,6 +811,45 @@ private struct AnimatedReaderLayout<Content: View>: View, Animatable {
     }
 }
 
+private struct DocumentTab: View {
+    let title: String
+    let isDirty: Bool
+    let isSelected: Bool
+    let onSelect: () -> Void
+    let onClose: () -> Void
+    @State private var isHovered = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Button(action: onSelect) {
+                Text(title + (isDirty ? " ●" : ""))
+                    .lineLimit(1).truncationMode(.middle)
+                    .foregroundStyle(isSelected || isHovered ? .primary : .secondary)
+            }
+            .buttonStyle(.plain)
+            Button(action: onClose) {
+                Image(systemName: "xmark").font(.system(size: 9))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .opacity(isSelected || isHovered ? 1 : 0)
+            .allowsHitTesting(isSelected || isHovered)
+            .accessibilityHidden(!isSelected && !isHovered)
+            .help("关闭标签页")
+        }
+        .font(.system(size: 13))
+        .padding(.horizontal, 9)
+        .frame(height: 30)
+        .contentShape(Rectangle())
+        .onHover { isHovered = $0 }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isHovered)
+        .overlay(alignment: .bottom) {
+            if isSelected { Rectangle().frame(height: 2) }
+        }
+    }
+}
+
 struct ReaderView: View {
     @ObservedObject var state: ReaderState
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -964,26 +1037,10 @@ struct ReaderView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 0) {
                     ForEach(state.tabs) { tab in
-                        HStack(spacing: 5) {
-                            Button { state.selectedID = tab.id } label: {
-                                Text(tab.title + (tab.isDirty ? " ●" : ""))
-                                    .lineLimit(1).truncationMode(.middle)
-                                    .foregroundStyle(state.selectedID == tab.id ? .primary : .secondary)
-                            }
-                            .buttonStyle(.plain)
-                            Button { state.closeTab(tab.id) } label: {
-                                Image(systemName: "xmark").font(.system(size: 9))
-                            }
-                            .buttonStyle(.plain)
-                            .foregroundStyle(.secondary)
-                            .help("关闭标签页")
-                        }
-                        .font(.system(size: 13))
-                        .padding(.horizontal, 9)
-                        .frame(height: 30)
-                        .overlay(alignment: .bottom) {
-                            if state.selectedID == tab.id { Rectangle().frame(height: 2) }
-                        }
+                        DocumentTab(title: tab.title, isDirty: tab.isDirty,
+                                    isSelected: state.selectedID == tab.id,
+                                    onSelect: { state.selectedID = tab.id },
+                                    onClose: { state.closeTab(tab.id) })
                     }
                     Button { state.newTab() } label: { Image(systemName: "plus") }
                         .buttonStyle(.plain)
@@ -1018,6 +1075,18 @@ struct ReaderView: View {
                 .font(.system(size: 12))
                 .padding(.horizontal, 12)
                 .frame(height: 32)
+                .background(Color.orange.opacity(0.12))
+            } else if let message = state.currentTab?.autoSaveError {
+                HStack(spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle")
+                    Text("自动保存失败：\(message)").lineLimit(2).help(message)
+                    Button("重试保存") { state.saveCurrent() }
+                    Button("另存为…") { state.saveAsCurrent() }
+                    Spacer(minLength: 0)
+                }
+                .font(.system(size: 12))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
                 .background(Color.orange.opacity(0.12))
             }
             if state.currentURL == nil && state.currentTab?.source.isEmpty != false

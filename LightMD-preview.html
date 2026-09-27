@@ -25,10 +25,12 @@
     .mode-toggle.editing-mode .book-icon { display: block; }
     .titlebar-name { position: absolute; left: 50%; top: 12px; transform: translateX(-50%); max-width: min(360px, 40vw); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 14px; font-weight: 600; }
     .tabs { min-height: 30px; display: flex; align-items: stretch; overflow-x: auto; border-bottom: 1px solid color-mix(in srgb, CanvasText 13%, transparent); }
-    .tab { display: flex; align-items: center; gap: 5px; padding: 0 9px; flex: none; font-size: 13px; color: color-mix(in srgb, CanvasText 55%, Canvas); }
+    .tab { display: flex; align-items: center; gap: 5px; padding: 0 9px; flex: none; font-size: 13px; color: color-mix(in srgb, CanvasText 55%, Canvas); transition: color .12s ease-out; }
+    .tab:hover { color: CanvasText; }
     .tab.active { color: CanvasText; border-bottom: 2px solid CanvasText; }
     .tab button { border: 0; background: transparent; padding: 0; }
-    .tab .close { opacity: .55; font-size: 11px; }
+    .tab .close { opacity: 0; visibility: hidden; font-size: 11px; transition: opacity .12s ease-out; }
+    .tab.active .close, .tab:hover .close, .tab:focus-within .close { opacity: .55; visibility: visible; }
     .new-tab { border: 0; background: transparent; padding: 0 8px; font-size: 14px; }
     .search-bar { height: 35px; display: flex; align-items: center; gap: 9px; padding: 0 14px; border-bottom: 1px solid color-mix(in srgb, CanvasText 13%, Canvas); background: color-mix(in srgb, CanvasText 4%, Canvas); font: 12px -apple-system, BlinkMacSystemFont, sans-serif; }
     .search-bar[hidden] { display: none; }
@@ -86,11 +88,11 @@
     .mirror-line { min-height: 21px; white-space: pre-wrap; overflow-wrap: anywhere; }
     .empty { height: 100%; display: grid; place-content: center; gap: 12px; text-align: center; color: color-mix(in srgb, CanvasText 55%, Canvas); }
     .empty .icon { font-size: 44px; }
-    @media (prefers-reduced-motion: reduce) { .outline, .page, .source-pane, .split-divider, .document-scroll { transition: none; } }
+    @media (prefers-reduced-motion: reduce) { .outline, .page, .source-pane, .split-divider, .document-scroll, .tab, .tab .close { transition: none; } }
   </style>
 </head>
 <body>
-  <div class="menu-bar" aria-label="中文菜单示意"><strong>LightMD</strong><span>文件</span><span>编辑</span><span>显示</span><span>窗口</span><span>帮助</span><small>菜单示意</small></div>
+  <div class="menu-bar" aria-label="中文菜单示意"><strong>LightMD</strong><span>文件</span><span>编辑</span><span>显示</span><span>窗口</span><span>帮助</span><small>交互预览 · 自动保存仅演示状态，不写回文件</small></div>
   <div class="mac-titlebar"><i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i><div class="capsule-controls"><button id="toggleMode" class="titlebar-toggle mode-toggle" title="切换到双栏编辑模式" aria-label="切换到双栏编辑模式"><svg class="split-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="2" y="2" width="16" height="16" rx="2"/><path d="M8 2v16"/></svg><svg class="book-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4c-2-1.5-5-1.5-8-1v13c3-.5 6-.5 8 1 2-1.5 5-1.5 8-1V3c-3-.5-6-.5-8 1Z"/><path d="M10 4v13"/></svg></button><button id="toggleOutline" class="titlebar-toggle" title="显示或隐藏右侧目录" aria-label="显示或隐藏右侧目录" aria-expanded="false"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2" y="2" width="16" height="16" rx="2"/><path d="M13 2v16"/></svg></button></div><span id="titleName" class="titlebar-name">阅读示例.md</span></div>
   <input id="file" type="file" accept=".md,.markdown,.mdown,.txt" multiple hidden>
   <nav class="tabs" id="tabs" aria-label="文档标签页"></nav>
@@ -135,6 +137,7 @@
     let modeFrame;
     let modeTransitioning = false;
     let renderTimer;
+    const autoSaveTimers = new WeakMap();
     let hits = [];
     let hitIndex = 0;
     function emptyHTML() { return '<div class="empty"><div class="icon">▤</div><div>打开 Markdown 文件</div><div>按 ⌘O 打开文件，或将 .md 文件拖到窗口中</div></div>'; }
@@ -217,6 +220,12 @@
       drawTabs();
       clearTimeout(renderTimer);
       renderTimer = setTimeout(() => redrawEditedPreview(tab), 180);
+      clearTimeout(autoSaveTimers.get(tab));
+      if (tab.path) autoSaveTimers.set(tab, setTimeout(() => {
+        if (!tabs.includes(tab)) return;
+        tab.savedSource = tab.source;
+        drawTabs();
+      }, 1000));
     });
     function setMode(next) {
       const previous = mode;
@@ -262,7 +271,6 @@
       positionReadingArea();
     }
     splitDivider.addEventListener('pointerdown', event => {
-      sourceEditor.style.width = sourceEditor.clientWidth + 'px';
       readingArea.classList.add('dragging');
       splitDivider.setPointerCapture(event.pointerId);
     });
@@ -277,7 +285,6 @@
     });
     function finishSplitResize() {
       if (!readingArea.classList.contains('dragging')) return;
-      sourceEditor.style.width = '';
       readingArea.classList.remove('dragging');
       resizeSourceMirror();
       alignScroll(documentScroll, sourceEditor);
