@@ -310,13 +310,24 @@
     function scrollAnchors() {
       const previewRect = documentScroll.getBoundingClientRect();
       const sourceRows = sourceMirror.children;
-      return [...page.querySelectorAll('[data-source-line]')].flatMap(node => {
+      const points = [...page.querySelectorAll('[data-source-line]')].flatMap(node => {
         const line = Number(node.dataset.sourceLine);
         if (!Number.isInteger(line) || !sourceRows[line]) return [];
         const sourceY = sourceRows[line].offsetTop;
-        const previewY = node.getBoundingClientRect().top - previewRect.top + documentScroll.scrollTop;
-        return [[sourceY, previewY]];
-      }).sort((a, b) => a[0] - b[0]);
+        const rect = node.getBoundingClientRect();
+        const previewY = rect.top - previewRect.top + documentScroll.scrollTop;
+        const end = Number(node.dataset.sourceEnd);
+        const sourceEnd = sourceRows[end]?.offsetTop ?? sourceMirror.offsetHeight - 18;
+        return Number.isInteger(end) ? [[sourceY, previewY], [sourceEnd, previewY + rect.height]] : [[sourceY, previewY]];
+      }).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+      const merged = [];
+      for (let index = 0; index < points.length;) {
+        let end = index + 1;
+        while (end < points.length && points[end][0] === points[index][0]) end++;
+        merged.push([points[index][0], (points[index][1] + points[end - 1][1]) / 2]);
+        index = end;
+      }
+      return merged;
     }
     function interpolate(position, points) {
       if (position <= points[0][0]) return points[0][1];
@@ -456,19 +467,19 @@
       let out = '', paragraph = [], list = '', items = [], table = [];
       const flushParagraph = () => {
         if (!paragraph.length) return;
-        out += `<p data-source-line="${paragraph[0].line}">${inline(paragraph.map(x => x.text).join(' '))}</p>`;
+        out += `<p data-source-line="${paragraph[0].line}" data-source-end="${paragraph.at(-1).line + 1}">${inline(paragraph.map(x => x.text).join(' '))}</p>`;
         paragraph = [];
       };
       const flushList = () => {
         if (!items.length) return;
-        out += `<${list}>` + items.map(x => `<li data-source-line="${x.line}">${inline(x.text)}</li>`).join('') + `</${list}>`;
+        out += `<${list}>` + items.map(x => `<li data-source-line="${x.line}" data-source-end="${x.line + 1}">${inline(x.text)}</li>`).join('') + `</${list}>`;
         items = []; list = '';
       };
       const flushTable = () => {
         if (!table.length) return;
         const cells = value => value.slice(1, -1).split('|').map(x => x.trim());
         if (table.length > 1 && /^\|[\s:|-]+\|$/.test(table[1].text)) {
-          const row = (item, tag) => `<tr data-source-line="${item.line}">` + cells(item.text).map(x => `<${tag}>${inline(x)}</${tag}>`).join('') + '</tr>';
+          const row = (item, tag) => `<tr data-source-line="${item.line}" data-source-end="${item.line + 1}">` + cells(item.text).map(x => `<${tag}>${inline(x)}</${tag}>`).join('') + '</tr>';
           out += '<table><thead>' + row(table[0], 'th') + '</thead><tbody>' + table.slice(2).map(x => row(x, 'td')).join('') + '</tbody></table>';
         } else out += `<pre data-source-line="${table[0].line}">` + escapeHTML(table.map(x => x.text).join('\n')) + '</pre>';
         table = [];
@@ -483,7 +494,7 @@
           flushParagraph(); flushList();
           const level = Math.min(heading[1].length, 3);
           const value = inline(heading[2]).replace(/^(\d+\.)\s*/, '<span class="heading-num">$1</span> ');
-          out += `<h${level} data-source-line="${lineIndex}">${value}</h${level}>`;
+          out += `<h${level} data-source-line="${lineIndex}" data-source-end="${lineIndex + 1}">${value}</h${level}>`;
           return;
         }
         const item = text.match(/^(?:([-*+])|(\d+)\.)\s+(.+)$/);
@@ -502,7 +513,7 @@
     }
     function renderPlain(source) {
       return source.replace(/\r\n?/g, '\n').split('\n')
-        .map((line, index) => `<div class="plain-line" data-source-line="${index}">` + (line ? escapeHTML(line) : '&nbsp;') + '</div>').join('');
+        .map((line, index) => `<div class="plain-line" data-source-line="${index}" data-source-end="${index + 1}">` + (line ? escapeHTML(line) : '&nbsp;') + '</div>').join('');
     }
     async function decodeFile(file) {
       const bytes = new Uint8Array(await file.arrayBuffer());

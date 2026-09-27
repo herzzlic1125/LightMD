@@ -203,6 +203,7 @@ final class ScrollSyncController {
         let path: String
         let fraction: CGFloat
         var atBottom = false
+        var sourceY: CGFloat?
         var root: String { String(path.split(separator: ".").first ?? "0") }
     }
     private struct SourceRegion {
@@ -224,6 +225,8 @@ final class ScrollSyncController {
     private var savedPreviewPosition: Position?
     private var requestedRoot: String?
     private var previewFrames: [String: CGRect] = [:]
+    private var recentPreviewFrames: [String: CGRect] = [:]
+    private var previewContentWidth: CGFloat?
     private var sourceSpans: [String: SourceLineSpan] = [:]
     private var cachedSourceSize = CGSize.zero
     private var regions: [SourceRegion] = []
@@ -280,8 +283,9 @@ final class ScrollSyncController {
     }
 
     func updateAnchors(_ frames: [String: CGRect], spans: [String: SourceLineSpan]) {
-        previewFrames = frames
         updateSpans(spans)
+        rememberPreviewFrames(frames)
+        previewFrames = frames
         guard pendingPosition != nil else { return }
         let ticket = generation
         DispatchQueue.main.async { [weak self] in
@@ -293,7 +297,44 @@ final class ScrollSyncController {
     func updateSpans(_ spans: [String: SourceLineSpan]) {
         guard sourceSpans != spans else { return }
         sourceSpans = spans
+        recentPreviewFrames.removeAll()
         invalidateSource()
+    }
+
+    private func rememberPreviewFrames(_ frames: [String: CGRect]) {
+        guard !frames.isEmpty else {
+            recentPreviewFrames.removeAll()
+            previewContentWidth = nil
+            return
+        }
+        let roots = frames.filter { !$0.key.contains(".") }
+        let width = roots.first?.value.width
+        let viewportY = preview?.contentView.bounds.minY ?? 0
+        let shared = roots.filter { previewFrames[$0.key] != nil }
+        let widthChanged: Bool
+        if let width, let previousWidth = previewContentWidth {
+            widthChanged = abs(width - previousWidth) > 1
+        } else { widthChanged = width != previewContentWidth }
+        if widthChanged || shared.contains(where: {
+            abs($0.value.height - (previewFrames[$0.key]?.height ?? 0)) > 0.5
+        }) {
+            recentPreviewFrames.removeAll()
+            previewContentWidth = width
+        } else if let nearest = shared.min(by: {
+            abs($0.value.minY - viewportY) < abs($1.value.minY - viewportY)
+        }), let previous = previewFrames[nearest.key] {
+            let shift = nearest.value.minY - previous.minY
+            if abs(shift) > 0.5 {
+                recentPreviewFrames = recentPreviewFrames.mapValues { $0.offsetBy(dx: 0, dy: shift) }
+            }
+        } else if shared.isEmpty {
+            recentPreviewFrames.removeAll()
+        }
+        recentPreviewFrames.merge(frames, uniquingKeysWith: { _, newest in newest })
+        let margin = max(300, (preview?.contentView.bounds.height ?? 700) * 2)
+        recentPreviewFrames = recentPreviewFrames.filter {
+            $0.value.maxY >= viewportY - margin && $0.value.minY <= viewportY + margin
+        }
     }
 
     func invalidateSource() {
@@ -419,7 +460,55 @@ final class ScrollSyncController {
         }
         let region = regions[max(0, low - 1)]
         let fraction = min(1, max(0, (y - region.start) / (region.end - region.start)))
-        return Position(path: region.path, fraction: fraction)
+        return Position(path: region.path, fraction: fraction, sourceY: y)
+    }
+
+    private func visibleMapping() -> [(source: CGFloat, preview: CGFloat)] {
+        prepareSourceRegions()
+        let frames = recentPreviewFrames.merging(previewFrames, uniquingKeysWith: { _, newest in newest })
+        var containers = Set<String>()
+        for path in frames.keys {
+            var components = path.split(separator: ".")
+            while components.count > 1 {
+                components.removeLast()
+                containers.insert(components.joined(separator: "."))
+            }
+        }
+        var points: [(source: CGFloat, preview: CGFloat)] = []
+        for (path, frame) in frames {
+            guard let region = regionsByPath[path], frame.height > 0,
+                  !containers.contains(path) else { continue }
+            points.append((region.start, frame.minY))
+            points.append((region.end, frame.maxY))
+        }
+        points.sort { $0.source == $1.source ? $0.preview < $1.preview : $0.source < $1.source }
+        var unique: [(source: CGFloat, preview: CGFloat)] = []
+        var index = 0
+        while index < points.count {
+            var end = index + 1
+            while end < points.count && abs(points[end].source - points[index].source) < 0.01 { end += 1 }
+            let point = (source: points[index].source,
+                         preview: (points[index].preview + points[end - 1].preview) / 2)
+            if let previous = unique.last {
+                if point.preview > previous.preview { unique.append(point) }
+            } else { unique.append(point) }
+            index = end
+        }
+        return unique
+    }
+
+    private func interpolate(_ value: CGFloat, from points: [(CGFloat, CGFloat)]) -> CGFloat? {
+        guard let first = points.first, let last = points.last else { return nil }
+        if value <= first.0 { return first.1 }
+        if value >= last.0 { return last.1 }
+        var low = 0, high = points.count - 1
+        while high - low > 1 {
+            let middle = (low + high) / 2
+            if points[middle].0 <= value { low = middle } else { high = middle }
+        }
+        let left = points[low], right = points[high]
+        let fraction = (value - left.0) / max(0.01, right.0 - left.0)
+        return left.1 + fraction * (right.1 - left.1)
     }
 
     private func previewPosition(at y: CGFloat) -> Position? {
@@ -450,10 +539,14 @@ final class ScrollSyncController {
     private func applyPendingPosition() {
         guard (isActive || pendingPreviewIntent), !isResizing,
               let position = pendingPosition, let preview else { return }
-        if let frame = previewFrames[position.path] {
-            let target = position.atBottom
-                ? (preview.documentView?.frame.height ?? 0) - preview.contentView.bounds.height
-                : frame.minY + position.fraction * frame.height
+        if let frame = previewFrames[position.path] ?? recentPreviewFrames[position.path] {
+            let target: CGFloat
+            if position.atBottom {
+                target = (preview.documentView?.frame.height ?? 0) - preview.contentView.bounds.height
+            } else if let sourceY = position.sourceY,
+                      let mapped = interpolate(sourceY, from: visibleMapping().map { ($0.source, $0.preview) }) {
+                target = mapped
+            } else { target = frame.minY + position.fraction * frame.height }
             scroll(preview, to: target)
             requestedRoot = nil
             if pendingPreviewIntent && isActive { synchronize(from: .preview) }
@@ -489,10 +582,8 @@ final class ScrollSyncController {
                 scroll(source, to: (source.documentView?.frame.height ?? 0) - source.contentView.bounds.height)
                 return
             }
-            guard let position = previewPosition(at: y) else { return }
-            prepareSourceRegions()
-            guard let region = regionsByPath[position.path] else { return }
-            scroll(source, to: region.start + position.fraction * (region.end - region.start))
+            guard let target = interpolate(y, from: visibleMapping().map { ($0.preview, $0.source) }) else { return }
+            scroll(source, to: target)
         }
     }
 }
