@@ -39,7 +39,7 @@
     .file-path { height: 26px; display: flex; align-items: center; padding: 0 16px; border-bottom: 1px solid color-mix(in srgb, CanvasText 13%, transparent); color: color-mix(in srgb, CanvasText 60%, Canvas); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .file-path[hidden] { display: none; }
     .reading-area { position: relative; height: calc(100vh - 106px - var(--path-height, 26px) - var(--search-height, 0px)); min-height: 320px; overflow: hidden; }
-    .source-pane { position: absolute; inset: 0 auto 0 0; width: var(--split-left, 40%); background: Canvas; transform: translateX(-100%); transition: transform .28s ease-in-out; pointer-events: none; }
+    .source-pane { position: absolute; inset: 0 auto 0 0; width: var(--split-left, 40%); background: Canvas; overflow: hidden; transform: translateX(-100%); transition: transform .28s ease-in-out; pointer-events: none; }
     .reading-area.editing .source-pane { transform: translateX(0); pointer-events: auto; }
     .source-pane textarea { width: 100%; height: 100%; resize: none; border: none; outline: none; padding: 18px 16px; background: Canvas; color: CanvasText; font: 14px/1.5 ui-monospace, SFMono-Regular, monospace; overflow: auto; white-space: pre-wrap; }
     .split-divider { position: absolute; z-index: 3; top: 0; bottom: 0; left: -14px; width: 14px; opacity: 0; transition: left .28s ease-in-out, opacity .28s ease-in-out; cursor: col-resize; touch-action: none; pointer-events: none; }
@@ -221,6 +221,7 @@
     function setMode(next) {
       const previous = mode;
       if (previous === next) return;
+      finishSplitResize();
       mode = next;
       cancelAnimationFrame(modeFrame);
       const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -257,10 +258,11 @@
       const previewMinimum = Math.min(360, width * .45);
       splitRatio = Math.min(Math.max(value, sourceMinimum / width), 1 - previewMinimum / width);
       readingArea.style.setProperty('--split-left', `${splitRatio * width}px`);
-      rebuildSourceMirror();
+      resizeSourceMirror();
       positionReadingArea();
     }
     splitDivider.addEventListener('pointerdown', event => {
+      sourceEditor.style.width = sourceEditor.clientWidth + 'px';
       readingArea.classList.add('dragging');
       splitDivider.setPointerCapture(event.pointerId);
     });
@@ -271,14 +273,24 @@
     });
     splitDivider.addEventListener('pointerup', event => {
       splitDivider.releasePointerCapture(event.pointerId);
-      readingArea.classList.remove('dragging');
+      finishSplitResize();
     });
-    splitDivider.addEventListener('lostpointercapture', () => readingArea.classList.remove('dragging'));
+    function finishSplitResize() {
+      if (!readingArea.classList.contains('dragging')) return;
+      sourceEditor.style.width = '';
+      readingArea.classList.remove('dragging');
+      resizeSourceMirror();
+      alignScroll(documentScroll, sourceEditor);
+    }
+    splitDivider.addEventListener('lostpointercapture', finishSplitResize);
     const suppressedScroll = new WeakMap();
     let pendingDriver;
     let syncScheduled = false;
-    function rebuildSourceMirror() {
+    function resizeSourceMirror() {
       sourceMirror.style.width = Math.max(1, sourceEditor.clientWidth) + 'px';
+    }
+    function rebuildSourceMirror() {
+      resizeSourceMirror();
       const fragment = document.createDocumentFragment();
       for (const line of sourceEditor.value.replace(/\r\n?/g, '\n').split('\n')) {
         const row = document.createElement('div');
@@ -327,7 +339,7 @@
       }
     }
     function scheduleScrollSync(driver, follower) {
-      if (mode !== 'split' || modeTransitioning) return;
+      if (mode !== 'split' || modeTransitioning || readingArea.classList.contains('dragging')) return;
       const suppressedY = suppressedScroll.get(driver);
       if (suppressedY !== undefined && Math.abs(driver.scrollTop - suppressedY) < 2) {
         suppressedScroll.delete(driver); return;

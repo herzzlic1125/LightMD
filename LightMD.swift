@@ -126,20 +126,21 @@ struct ReaderTab: Identifiable {
     var outline: [OutlineEntry]
     var index: [IndexedBlock]
     var plainLines: [String]?
-    var scrollLines: [String: Int]
+    var scrollSpans: [String: SourceLineSpan]
     var encodingName: String
     var stamp: FileStamp?
     var savedSource: String
     var savedData: Data?
     var externalConflict: Bool
     var editRevision: UInt64
+    var previewID: UUID
 
     init(id: UUID = UUID(), url: URL? = nil, source: String = "", document: Document? = nil,
          outline: [OutlineEntry] = [], index: [IndexedBlock] = [], plainLines: [String]? = nil,
-         scrollLines: [String: Int] = [:],
+         scrollSpans: [String: SourceLineSpan] = [:],
          encodingName: String = "UTF-8", stamp: FileStamp? = nil,
          savedSource: String = "", savedData: Data? = nil, externalConflict: Bool = false,
-         editRevision: UInt64 = 0) {
+         editRevision: UInt64 = 0, previewID: UUID = UUID()) {
         self.id = id
         self.url = url
         self.source = source
@@ -147,13 +148,14 @@ struct ReaderTab: Identifiable {
         self.outline = outline
         self.index = index
         self.plainLines = plainLines
-        self.scrollLines = scrollLines
+        self.scrollSpans = scrollSpans
         self.encodingName = encodingName
         self.stamp = stamp
         self.savedSource = savedSource
         self.savedData = savedData
         self.externalConflict = externalConflict
         self.editRevision = editRevision
+        self.previewID = previewID
     }
 
     var title: String { url?.lastPathComponent ?? "未命名" }
@@ -287,10 +289,14 @@ final class ReaderState: ObservableObject {
         }
     }
 
-    private static func scrollLines(for document: Document) -> [String: Int] {
-        var lines: [String: Int] = [:]
+    private static func scrollSpans(for document: Document) -> [String: SourceLineSpan] {
+        var lines: [String: SourceLineSpan] = [:]
         func collect(_ block: Markup, path: String) {
-            if let line = block.range?.lowerBound.line { lines[path] = line }
+            if let range = block.range {
+                let end = range.upperBound.line + (range.upperBound.column > 1 ? 1 : 0)
+                lines[path] = SourceLineSpan(start: range.lowerBound.line,
+                                             end: max(range.lowerBound.line + 1, end))
+            }
             if block is OrderedList || block is UnorderedList || block is ListItem || block is BlockQuote {
                 for (index, child) in block.children.enumerated() {
                     collect(child, path: "\(path).\(index)")
@@ -350,14 +356,14 @@ final class ReaderState: ObservableObject {
             return ReaderTab(id: id, url: url, source: text,
                              index: lines.enumerated().map { IndexedBlock(path: String($0.offset), text: $0.element) },
                              plainLines: lines,
-                             scrollLines: Dictionary(uniqueKeysWithValues: lines.indices.map { (String($0), $0 + 1) }),
+                             scrollSpans: Dictionary(uniqueKeysWithValues: lines.indices.map { (String($0), SourceLineSpan(start: $0 + 1, end: $0 + 2)) }),
                              encodingName: encoding, stamp: stamp,
                              savedSource: text, savedData: data)
         }
         let document = Document(parsing: text)
         return ReaderTab(id: id, url: url, source: text, document: document,
                          outline: outline(for: document), index: index(for: document),
-                         scrollLines: scrollLines(for: document),
+                         scrollSpans: scrollSpans(for: document),
                          encodingName: encoding, stamp: stamp,
                          savedSource: text, savedData: data)
     }
@@ -408,15 +414,16 @@ final class ReaderState: ObservableObject {
             tabs[index].document = nil
             tabs[index].outline = []
             tabs[index].index = lines.enumerated().map { IndexedBlock(path: String($0.offset), text: $0.element) }
-            tabs[index].scrollLines = Dictionary(uniqueKeysWithValues: lines.indices.map { (String($0), $0 + 1) })
+            tabs[index].scrollSpans = Dictionary(uniqueKeysWithValues: lines.indices.map { (String($0), SourceLineSpan(start: $0 + 1, end: $0 + 2)) })
         } else {
             let document = Document(parsing: source)
             tabs[index].document = document
             tabs[index].outline = Self.outline(for: document)
             tabs[index].index = Self.index(for: document)
-            tabs[index].scrollLines = Self.scrollLines(for: document)
+            tabs[index].scrollSpans = Self.scrollSpans(for: document)
             tabs[index].plainLines = nil
         }
+        tabs[index].previewID = UUID()
         pendingParse[tabID] = nil
     }
 
@@ -703,8 +710,8 @@ private struct ScrollResolver: NSViewRepresentable {
 }
 
 private struct PreviewScrollAnchorKey: PreferenceKey {
-    static var defaultValue: [String: CGFloat] = [:]
-    static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
+    static var defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
         value.merge(nextValue(), uniquingKeysWith: { _, latest in latest })
     }
 }
@@ -713,8 +720,60 @@ private extension View {
     func previewScrollAnchor(_ path: String) -> some View {
         background(GeometryReader { geometry in
             Color.clear.preference(key: PreviewScrollAnchorKey.self,
-                                   value: [path: geometry.frame(in: .named("previewContent")).minY])
+                                   value: [path: geometry.frame(in: .named("previewContent"))])
         })
+    }
+}
+
+private struct PreviewDocumentContent: View, Equatable {
+    let tabID: UUID
+    let previewID: UUID
+    let lines: [String]?
+    let document: Document?
+    let fontSize: CGFloat
+    let activeSearchPath: String?
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.tabID == rhs.tabID && lhs.previewID == rhs.previewID
+            && lhs.fontSize == rhs.fontSize && lhs.activeSearchPath == rhs.activeSearchPath
+    }
+
+    var body: some View {
+        LazyVStack(alignment: .leading, spacing: lines == nil ? 14 : 0) {
+            if let lines {
+                ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
+                    styledReadingText(line.isEmpty ? " " : line, size: fontSize)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(activeSearchPath == String(index)
+                                    ? Color.yellow.opacity(0.16) : Color.clear)
+                        .id("document:\(index)")
+                        .previewScrollAnchor(String(index))
+                }
+            } else {
+                ForEach(Array((document.map { Array($0.children) } ?? []).enumerated()), id: \.offset) { index, block in
+                    MarkdownBlockView(block: block, fontSize: fontSize, path: String(index))
+                        .background(activeSearchPath == String(index)
+                                    ? Color.yellow.opacity(0.16) : Color.clear)
+                        .id("document:\(index)")
+                }
+            }
+        }
+    }
+}
+
+private struct AnimatedReaderLayout<Content: View>: View, Animatable {
+    var modeProgress: CGFloat
+    var outlineInset: CGFloat
+    let content: (CGFloat, CGFloat) -> Content
+
+    var animatableData: AnimatablePair<CGFloat, CGFloat> {
+        get { AnimatablePair(modeProgress, outlineInset) }
+        set { modeProgress = newValue.first; outlineInset = newValue.second }
+    }
+
+    var body: some View {
+        content(modeProgress, outlineInset)
+            .transaction { $0.animation = nil; $0.disablesAnimations = true }
     }
 }
 
@@ -727,7 +786,6 @@ struct ReaderView: View {
     @State private var animatedOutlineInset: CGFloat = 0
     @State private var outlineBeforeEditing = false
     @State private var editSplitRatio: CGFloat = 0.4
-    @State private var editSplitDragStart: CGFloat?
     @State private var editorMounted = false
     @State private var animatedModeProgress: CGFloat = 0
     @State private var modeTransitioning = false
@@ -788,6 +846,7 @@ struct ReaderView: View {
         let generation = modeGeneration
         let tabID = state.selectedID
         let target: CGFloat = editing ? 1 : 0
+        scrollSync.endDividerResize()
         scrollSync.isActive = false
         modeTransitioning = true
         if editing { editorMounted = true }
@@ -973,6 +1032,8 @@ struct ReaderView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
+                AnimatedReaderLayout(modeProgress: animatedModeProgress,
+                                     outlineInset: animatedOutlineInset) { modeProgress, outlineInset in
                 GeometryReader { splitGeometry in
                 let dividerWidth: CGFloat = 14
                 let availableWidth = max(1, splitGeometry.size.width - dividerWidth)
@@ -981,9 +1042,9 @@ struct ReaderView: View {
                 let sourceWidth = min(max(availableWidth * editSplitRatio, minimumSource),
                                       availableWidth - minimumPreview)
                 let modeInset = sourceWidth + dividerWidth
-                let visibleSourceWidth = animatedModeProgress * sourceWidth
-                let visibleDividerWidth = animatedModeProgress * dividerWidth
-                let previewWidth = max(1, splitGeometry.size.width - animatedModeProgress * modeInset)
+                let visibleSourceWidth = modeProgress * sourceWidth
+                let visibleDividerWidth = modeProgress * dividerWidth
+                let previewWidth = max(1, splitGeometry.size.width - modeProgress * modeInset)
                 HStack(spacing: 0) {
                     if editorMounted, let tabID = state.currentTab?.id {
                         MarkdownSourceEditor(text: state.currentTab?.source ?? "",
@@ -1001,83 +1062,61 @@ struct ReaderView: View {
                             .allowsHitTesting(state.isEditing && !modeTransitioning)
                             .accessibilityHidden(!state.isEditing || modeTransitioning)
 
-                        Rectangle()
-                            .fill(.clear)
+                        SplitHandle(ratio: editSplitRatio,
+                                    availableWidth: availableWidth,
+                                    minimumRatio: minimumSource / availableWidth,
+                                    maximumRatio: 1 - minimumPreview / availableWidth,
+                                    active: state.isEditing && !modeTransitioning,
+                                    onDragStarted: { scrollSync.beginDividerResize() },
+                                    onRatioChanged: { editSplitRatio = $0 },
+                                    onDragEnded: {
+                                        scrollSync.endDividerResize()
+                                        DispatchQueue.main.async { scrollSync.alignSourceToPreview() }
+                                    })
                             .frame(width: visibleDividerWidth, height: splitGeometry.size.height)
-                            .overlay { Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 1) }
-                            .contentShape(Rectangle())
                             .allowsHitTesting(state.isEditing && !modeTransitioning)
                             .accessibilityHidden(!state.isEditing || modeTransitioning)
-                            .gesture(DragGesture(minimumDistance: 0)
-                                .onChanged { drag in
-                                    guard !modeTransitioning else { return }
-                                    if editSplitDragStart == nil { editSplitDragStart = editSplitRatio }
-                                    let proposed = (editSplitDragStart ?? editSplitRatio)
-                                        + drag.translation.width / availableWidth
-                                    editSplitRatio = min(max(proposed, minimumSource / availableWidth),
-                                                         1 - minimumPreview / availableWidth)
-                                }
-                                .onEnded { _ in editSplitDragStart = nil })
                     }
                     ScrollViewReader { proxy in
                     GeometryReader { geometry in
                         let width = geometry.size.width
                         ZStack(alignment: .topLeading) {
                             ScrollView {
-                                VStack(alignment: .leading, spacing: state.currentLines == nil ? 14 : 0) {
-                                    if let lines = state.currentLines {
-                                        ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
-                                            styledReadingText(line.isEmpty ? " " : line, size: state.fontSize)
-                                                .frame(maxWidth: .infinity, alignment: .leading)
-                                                .background(state.activeSearchPath == String(index)
-                                                            ? Color.yellow.opacity(0.16) : Color.clear)
-                                                .id("document:\(index)")
-                                                .previewScrollAnchor(String(index))
-                                        }
-                                    } else {
-                                        ForEach(Array((state.currentDocument.map { Array($0.children) } ?? []).enumerated()), id: \.offset) { index, block in
-                                            MarkdownBlockView(block: block, fontSize: state.fontSize,
-                                                              path: String(index))
-                                                .background(state.activeSearchPath == String(index)
-                                                            ? Color.yellow.opacity(0.16) : Color.clear)
-                                        }
-                                    }
-                                }
+                                PreviewDocumentContent(tabID: state.selectedID,
+                                                       previewID: state.currentTab?.previewID ?? state.selectedID,
+                                                       lines: state.currentLines,
+                                                       document: state.currentDocument,
+                                                       fontSize: state.fontSize,
+                                                       activeSearchPath: state.activeSearchPath)
+                                .equatable()
                                 .background(ScrollResolver {
                                     scrollKeeper.scrollView = $0
-                                    scrollSync.attachPreview($0)
+                                    scrollSync.attachPreview($0, reveal: { proxy.scrollTo("document:\($0)", anchor: .top) })
                                 }
                                     .frame(width: 0, height: 0))
-                                .frame(width: textWidth(for: animatedOutlineInset, available: width), alignment: .leading)
+                                .frame(width: textWidth(for: outlineInset, available: width), alignment: .leading)
                                 .padding(.vertical, 18)
                                 .coordinateSpace(name: "previewContent")
                                 .textSelection(.enabled)
-                                .offset(x: textX(for: animatedOutlineInset, available: width))
+                                .offset(x: textX(for: outlineInset, available: width))
                                 .frame(width: width, alignment: .leading)
                             }
                             .id(state.selectedID)
                             .frame(width: width)
                             .onPreferenceChange(PreviewScrollAnchorKey.self) { anchors in
                                 scrollSync.updateAnchors(anchors,
-                                                         lines: state.currentTab?.scrollLines ?? [:])
+                                                         spans: state.currentTab?.scrollSpans ?? [:])
                             }
 
                             HStack(spacing: 0) {
                                 Divider()
                                 outlineSidebar { entry in
-                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                        proxy.scrollTo("document:\(entry.id)", anchor: .top)
-                                    }
-                                    if state.isEditing {
-                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
-                                            scrollSync.alignSourceToPreview()
-                                        }
-                                    }
+                                    scrollSync.navigatePreview(to: entry.id)
                                 }
                             }
                             .frame(width: outlineWidth, alignment: .leading)
                             .background(Color(nsColor: .windowBackgroundColor))
-                            .offset(x: width - animatedOutlineInset)
+                            .offset(x: width - outlineInset)
                             .allowsHitTesting(state.showsOutline)
                             .accessibilityHidden(!state.showsOutline)
                         }
@@ -1087,15 +1126,9 @@ struct ReaderView: View {
                             guard let request = state.navigationRequest else { return }
                             await Task.yield()
                             guard request.tabID == state.selectedID else { return }
-                            withAnimation(.easeInOut(duration: 0.18)) {
-                                proxy.scrollTo("document:\(request.path)", anchor: .top)
-                            }
-                            if state.isEditing {
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                                    scrollSync.alignSourceToPreview()
-                                }
-                            }
+                            scrollSync.navigatePreview(to: request.path)
                         }
+                    }
                     }
                     .frame(width: previewWidth, height: splitGeometry.size.height)
                 }
@@ -1103,8 +1136,8 @@ struct ReaderView: View {
                        alignment: .topLeading)
                 .clipped()
                 }
+                }
             }
-        }
         }
         .frame(minWidth: state.isEditing ? 880 : 680, minHeight: 420)
         .background(WindowChrome(title: state.currentTab?.title ?? "未命名",
@@ -1136,10 +1169,17 @@ struct ReaderView: View {
             state.afterReload = { [weak keeper, weak reader] tabID in
                 if reader?.selectedID == tabID { keeper?.restore() }
             }
-            state.beforeModeChange = { [weak keeper] in keeper?.captureIfNeeded() }
+            state.beforeModeChange = { [weak keeper, weak scrollSync] in
+                keeper?.captureIfNeeded()
+                scrollSync?.capturePreviewPosition()
+            }
             state.afterModeChange = { [weak keeper, weak scrollSync] in
-                keeper?.restore()
-                scrollSync?.alignSourceToPreview()
+                if scrollSync?.restorePreviewPosition() == true {
+                    keeper?.discard()
+                } else {
+                    keeper?.restore()
+                    scrollSync?.alignSourceToPreview()
+                }
             }
         }
         .onChange(of: state.showsOutline) { transitionOutline(to: $0) }
@@ -1152,20 +1192,27 @@ struct ReaderView: View {
             }
             transitionMode(to: editing)
         }
-        .onChange(of: state.selectedID) { _ in
+        .onChange(of: state.selectedID) { tabID in
             settleOutline()
             settleMode()
-            scrollSync.updateAnchors([:], lines: state.currentTab?.scrollLines ?? [:])
+            scrollSync.endDividerResize()
+            let ticket = scrollSync.beginPreviewNavigation()
+            scrollSync.updateAnchors([:], spans: state.currentTab?.scrollSpans ?? [:])
             scrollKeeper.discard()
             state.searchHitIndex = 0
             if state.isEditing {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                    scrollSync.alignSourceToPreview()
+                    guard state.selectedID == tabID else { return }
+                    scrollSync.completePreviewNavigation(ticket)
                 }
             }
         }
-        .onChange(of: state.currentTab?.scrollLines) { lines in
-            scrollSync.updateLines(lines ?? [:])
+        .onChange(of: state.currentTab?.scrollSpans) { lines in
+            scrollSync.updateSpans(lines ?? [:])
+        }
+        .onChange(of: state.currentTab?.previewID) { _ in
+            _ = scrollSync.beginPreviewNavigation()
+            scrollSync.invalidateSource()
         }
         .onChange(of: reduceMotion) { enabled in
             if enabled && modeTransitioning {
@@ -1182,6 +1229,7 @@ struct ReaderView: View {
         }
         .onDisappear {
             pendingModeCommit?.cancel()
+            scrollSync.endDividerResize()
             scrollSync.isActive = false
             scrollSync.detachSource()
             state.beforeReload = nil
