@@ -84,6 +84,16 @@
     .page th { background: color-mix(in srgb, CanvasText 5%, Canvas); }
     .page .plain-line { white-space: pre-wrap; overflow-wrap: anywhere; }
     .page .search-hit { background: #ffd94d44; }
+    .formula { font-family: math; color: inherit; cursor: context-menu; }
+    .formula.block { display: block; overflow-x: auto; text-align: center; padding: 8px 0; font-size: 1.12em; }
+    .formula math { color: inherit; }
+    .local-image { display: block; max-width: 100%; max-height: 640px; margin: 12px auto; object-fit: contain; cursor: zoom-in; }
+    .image-fallback { color: GrayText; font: 13px -apple-system, sans-serif; }
+    .image-dialog { max-width: 92vw; max-height: 92vh; border: 1px solid #8885; border-radius: 12px; padding: 18px; background: Canvas; color: CanvasText; }
+    .image-dialog::backdrop { background: #0008; }
+    .image-dialog img { display: block; max-width: 85vw; max-height: 78vh; }
+    .image-dialog button { float: right; border: 0; background: transparent; margin-bottom: 12px; }
+    #formulaMenu { position: fixed; z-index: 10; border: 1px solid #8885; border-radius: 6px; padding: 8px 12px; box-shadow: 0 4px 16px #0002; background: Canvas; }
     .source-mirror { position: absolute; left: -100000px; top: 0; visibility: hidden; pointer-events: none; padding: 18px 16px; font: 14px/1.5 ui-monospace, SFMono-Regular, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
     .mirror-line { min-height: 21px; white-space: pre-wrap; overflow-wrap: anywhere; }
     .empty { height: 100%; display: grid; place-content: center; gap: 12px; text-align: center; color: color-mix(in srgb, CanvasText 55%, Canvas); }
@@ -92,7 +102,7 @@
   </style>
 </head>
 <body>
-  <div class="menu-bar" aria-label="中文菜单示意"><strong>LightMD</strong><span>文件</span><span>编辑</span><span>显示</span><span>窗口</span><span>帮助</span><small>交互预览 · 自动保存仅演示状态，不写回文件</small></div>
+  <div class="menu-bar" aria-label="中文菜单示意"><strong>LightMD</strong><span>文件</span><span>编辑</span><span>显示</span><span>窗口</span><span>帮助</span><small>交互预览 · 刷新可恢复标签与草稿；不会写回磁盘文件</small></div>
   <div class="mac-titlebar"><i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i><div class="capsule-controls"><button id="toggleMode" class="titlebar-toggle mode-toggle" title="切换到双栏编辑模式" aria-label="切换到双栏编辑模式"><svg class="split-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="2" y="2" width="16" height="16" rx="2"/><path d="M8 2v16"/></svg><svg class="book-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4c-2-1.5-5-1.5-8-1v13c3-.5 6-.5 8 1 2-1.5 5-1.5 8-1V3c-3-.5-6-.5-8 1Z"/><path d="M10 4v13"/></svg></button><button id="toggleOutline" class="titlebar-toggle" title="显示或隐藏右侧目录" aria-label="显示或隐藏右侧目录" aria-expanded="false"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2" y="2" width="16" height="16" rx="2"/><path d="M13 2v16"/></svg></button></div><span id="titleName" class="titlebar-name">阅读示例.md</span></div>
   <input id="file" type="file" accept=".md,.markdown,.mdown,.txt" multiple hidden>
   <nav class="tabs" id="tabs" aria-label="文档标签页"></nav>
@@ -104,6 +114,8 @@
   <div class="split-divider" id="splitDivider" role="separator" aria-orientation="vertical" aria-label="调整源码和预览宽度"></div>
   <aside class="outline" id="outline"><div class="outline-inner"><div class="outline-title">目录</div><div class="outline-list" id="outlineList"></div></div></aside>
   <div class="document-scroll" id="documentScroll"><main class="page" id="page"><h1>LightMD 阅读示例</h1><p>打开文档，查看排版，或切换编辑模式。</p></main></div></div>
+  <dialog id="imageDialog" class="image-dialog"><button id="closeImage" aria-label="关闭图片预览">关闭 ×</button><img id="enlargedImage" alt="图片预览"></dialog>
+  <button id="formulaMenu" hidden>复制公式源码</button>
   <script>
     const page = document.getElementById('page');
     const tabsElement = document.getElementById('tabs');
@@ -126,10 +138,89 @@
     let targetInset = 0;
     let visualInset = 0;
     let outlineFrame;
+    const formulaExamples = new Map([
+      ['x_i^2', '<msubsup><mi>x</mi><mi>i</mi><mn>2</mn></msubsup>'],
+      ['E=mc^2', '<mi>E</mi><mo>=</mo><mi>m</mi><msup><mi>c</mi><mn>2</mn></msup>'],
+      ['\\frac{-b\\pm\\sqrt{b^2-4ac}}{2a}', '<mfrac><mrow><mo>−</mo><mi>b</mi><mo>±</mo><msqrt><msup><mi>b</mi><mn>2</mn></msup><mo>−</mo><mn>4</mn><mi>a</mi><mi>c</mi></msqrt></mrow><mrow><mn>2</mn><mi>a</mi></mrow></mfrac>'],
+      ['\\begin{pmatrix}1&2\\\\3&4\\end{pmatrix}', '<mrow><mo>(</mo><mtable><mtr><mtd><mn>1</mn></mtd><mtd><mn>2</mn></mtd></mtr><mtr><mtd><mn>3</mn></mtd><mtd><mn>4</mn></mtd></mtr></mtable><mo>)</mo></mrow>'],
+      ['\\begin{cases}x^2&\\text{若 }x>0\\\\ 0&\\text{否则}\\end{cases}', '<mrow><mo>{</mo><mtable columnalign="left"><mtr><mtd><msup><mi>x</mi><mn>2</mn></msup></mtd><mtd><mtext>若 </mtext><mi>x</mi><mo>&gt;</mo><mn>0</mn></mtd></mtr><mtr><mtd><mn>0</mn></mtd><mtd><mtext>否则</mtext></mtd></mtr></mtable></mrow>']
+    ]);
+    const sampleImage = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="720" height="300" viewBox="0 0 720 300"><rect width="720" height="300" fill="#f1f5f9"/><path d="M65 35V255H670" fill="none" stroke="#64748b" stroke-width="2"/><path d="M75 215C145 215 145 75 225 75S300 215 380 215 450 75 530 75 600 215 660 215" fill="none" stroke="#4385bd" stroke-width="5"/><text x="80" y="38" fill="#475569" font-family="sans-serif" font-size="18">Local image · 720 × 300</text></svg>');
+    const featureSource = String.raw`# 公式、图片与会话恢复
+
+行内公式 $x_i^2$ 与 \(E=mc^2\) 可以和正文一起显示。
+
+## LaTeX 数学公式
+
+$$
+\frac{-b\pm\sqrt{b^2-4ac}}{2a}
+$$
+
+\[
+\begin{pmatrix}1&2\\3&4\end{pmatrix}
+\]
+
+$$\begin{cases}x^2&\text{若 }x>0\\ 0&\text{否则}\end{cases}$$
+
+右键公式可以复制源码；无法识别的公式保留原文，例如 $\unknowncommand$。浏览器预览演示这些固定公式；原生应用支持编辑任意受支持的 LaTeX 公式。
+
+## 本地图片
+
+![本地图片示例](./images/diagram.svg)
+
+点击图片可放大，按 Escape 关闭。原生应用读取 Markdown 文件旁的相对路径图片，使用系统快速查看打开原图；此 HTML 内嵌了示例图。
+
+## 会话与草稿
+
+新建未命名标签并输入文字，再刷新这个预览：标签、当前选择、草稿和阅读位置会恢复。预览仅使用浏览器本地存储；原生应用使用自己的本地会话文件。
+
+## 继续阅读
+
+会话恢复不会覆盖在外部发生变化的文件。原生应用会保留草稿并提示冲突，可另存为副本。
+
+## 阅读位置示例
+
+` + Array.from({length: 12}, (_, i) => `### 示例段落 ${i + 1}\n\n这段用于检查刷新后的阅读位置。页面变窄时正文实时换行，滚动恢复按内容块定位。\n\n`).join('').replaceAll('\\n', '\n');
     const initialSource = ["# LightMD 阅读示例", "", "这是一份用于查看 Markdown 排版与编辑效果的示例文档。", "", "## 阅读与编辑", "", "正文支持 **粗体**、*斜体*、English 和 12345。", "", "1. 打开文档，查看排版。", "2. 切换编辑模式，调整左右宽度。", "", "### 常用功能", "", "| 功能 | 说明 | 操作 |", "| --- | --- | --- |", "| 阅读 | 查看文档 | 打开文件 |", "| 编辑 | 实时预览 | 切换模式 |"].join('\n');
     let tabs = [{ name: '阅读示例.md', path: '/Users/example/Documents/LightMD/阅读示例.md', source: initialSource,
-                  savedSource: initialSource, html: render(initialSource) }];
-    let active = 0;
+                  savedSource: initialSource, html: render(initialSource) },
+                { name: '公式与图片.md', path: '/Users/example/Documents/LightMD/公式与图片.md', source: featureSource,
+                  savedSource: featureSource, html: render(featureSource) }];
+    let active = 1;
+    const sessionKey = 'LightMD-preview-session-v016';
+    let sessionTimer, switchingPage = false;
+    function captureBookmark() {
+      if (switchingPage || !tabs[active]) return;
+      const top = documentScroll.scrollTop;
+      const blocks = [...page.querySelectorAll('[data-source-line]')];
+      const block = blocks.find(node => node.offsetTop + node.offsetHeight >= top) || blocks.at(-1);
+      tabs[active].bookmark = block ? { line: block.dataset.sourceLine,
+        fraction: (top - block.offsetTop) / Math.max(1, block.offsetHeight),
+        atTop: top < 1, atBottom: top > 1 && top >= documentScroll.scrollHeight - documentScroll.clientHeight - 1 } : null;
+    }
+    function saveSession() {
+      captureBookmark();
+      try { localStorage.setItem(sessionKey, JSON.stringify({ active,
+        tabs: tabs.map(({html, ...tab}) => tab) })); } catch { /* Browser storage can be disabled. */ }
+    }
+    function scheduleSession() { clearTimeout(sessionTimer); sessionTimer = setTimeout(saveSession, 450); }
+    function restoreBookmark() {
+      const bookmark = tabs[active].bookmark;
+      if (!bookmark || bookmark.atTop) return;
+      const block = [...page.querySelectorAll('[data-source-line]')].find(node => node.dataset.sourceLine === bookmark.line);
+      if (bookmark.atBottom) documentScroll.scrollTop = documentScroll.scrollHeight;
+      else if (block) documentScroll.scrollTop = block.offsetTop + bookmark.fraction * block.offsetHeight;
+    }
+    function restoreSession() {
+      try {
+        const stored = JSON.parse(localStorage.getItem(sessionKey));
+        if (!stored?.tabs?.length || !stored.tabs.every(tab => typeof tab.source === 'string' && typeof tab.name === 'string')) return;
+        tabs = stored.tabs.map(tab => ({...tab, html: /\.txt$/i.test(tab.name) ? renderPlain(tab.source) : render(tab.source)}));
+        active = Math.max(0, Math.min(Number(stored.active) || 0, tabs.length - 1));
+      } catch { /* Keep the example when no valid preview session exists. */ }
+    }
+    window.addEventListener('pagehide', saveSession);
+    documentScroll.addEventListener('scroll', scheduleSession);
     let mode = 'reading';
     let outlineBeforeEditing = false;
     let splitRatio = 0.4;
@@ -145,9 +236,9 @@
       tabsElement.replaceChildren();
       tabs.forEach((tab, index) => {
         const item = document.createElement('div'); item.className = 'tab' + (index === active ? ' active' : '');
-        const select = document.createElement('button'); select.textContent = tab.name + (tab.source !== tab.savedSource ? ' ●' : ''); select.onclick = () => { active = index; drawTabs(); drawPage(); };
+        const select = document.createElement('button'); select.textContent = tab.name + (tab.source !== tab.savedSource ? ' ●' : ''); select.onclick = () => { captureBookmark(); active = index; drawTabs(); drawPage(); };
         const close = document.createElement('button'); close.className = 'close'; close.textContent = '×'; close.title = '关闭标签页';
-        close.onclick = () => { if (tab.source !== tab.savedSource && !confirm('这份文档尚未保存，仍要关闭标签页吗？')) return; tabs.splice(index, 1); if (!tabs.length) tabs = [{ name: '未命名', source: '', savedSource: '', html: '' }]; active = Math.min(active, tabs.length - 1); drawTabs(); drawPage(); };
+        close.onclick = () => { captureBookmark(); if (tab.source !== tab.savedSource && !confirm('这份文档尚未保存，仍要关闭标签页吗？')) return; tabs.splice(index, 1); if (!tabs.length) tabs = [{ name: '未命名', source: '', savedSource: '', html: '' }]; active = Math.min(active, tabs.length - 1); drawTabs(); drawPage(); };
         item.append(select, close); tabsElement.append(item);
       });
       const add = document.createElement('button'); add.className = 'new-tab'; add.textContent = '+'; add.title = '新建标签页 (⌘T)'; add.onclick = newTab; tabsElement.append(add);
@@ -157,7 +248,7 @@
       const nodes = [];
       while (walker.nextNode()) {
         const node = walker.currentNode;
-        if (!node.parentElement.closest('code,pre,script,style')) nodes.push(node);
+        if (!node.parentElement.closest('code,pre,script,style,math,.formula')) nodes.push(node);
       }
       for (const node of nodes) {
         const parts = node.nodeValue.split(/([A-Za-zÀ-ÿ]+|[0-9]+|[，。：；「」（）《》？！～、．“”‘’【】]+)/g);
@@ -186,6 +277,7 @@
       });
     }
     function drawPage() {
+      switchingPage = true;
       page.innerHTML = tabs[active].html || emptyHTML();
       page.classList.toggle('blank', !tabs[active].html);
       titleName.textContent = tabs[active].name;
@@ -199,8 +291,12 @@
       drawOutline();
       updateSearch(false);
       positionReadingArea(true);
+      restoreBookmark();
+      page.querySelectorAll('img').forEach(img => img.addEventListener('load', restoreBookmark, {once: true}));
+      switchingPage = false;
+      scheduleSession();
     }
-    function newTab() { tabs.push({ name: '未命名', path: '', source: '', savedSource: '', html: '' }); active = tabs.length - 1; drawTabs(); drawPage(); }
+    function newTab() { captureBookmark(); tabs.push({ name: '未命名', path: '', source: '', savedSource: '', html: '' }); active = tabs.length - 1; drawTabs(); drawPage(); }
     function redrawEditedPreview(tab) {
       tab.html = /\.txt$/i.test(tab.name) ? renderPlain(tab.source) : render(tab.source);
       if (tabs[active] !== tab) return;
@@ -216,6 +312,7 @@
     sourceEditor.addEventListener('input', () => {
       const tab = tabs[active];
       tab.source = sourceEditor.value;
+      scheduleSession();
       rebuildSourceMirror();
       drawTabs();
       clearTimeout(renderTimer);
@@ -224,7 +321,7 @@
       if (tab.path) autoSaveTimers.set(tab, setTimeout(() => {
         if (!tabs.includes(tab)) return;
         tab.savedSource = tab.source;
-        drawTabs();
+        drawTabs(); scheduleSession();
       }, 1000));
     });
     function setMode(next) {
@@ -460,8 +557,27 @@
       if (key === '-') { e.preventDefault(); setFont(font - 1); }
       if (key === '0') { e.preventDefault(); setFont(16); }
     });
-    function escapeHTML(s) { return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
-    function inline(s) { return escapeHTML(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\*(.+?)\*/g, '<em>$1</em>').replace(/~~(.+?)~~/g, '<del>$1</del>').replace(/`(.+?)`/g, '<code>$1</code>').replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>'); }
+    function escapeHTML(s) { return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+    function mathHTML(original) {
+      const display = original.startsWith('$$') || original.startsWith('\\[');
+      const formula = original.startsWith('$$') ? original.slice(2, -2).trim()
+        : original.startsWith('$') ? original.slice(1, -1).trim() : original.slice(2, -2).trim();
+      const body = formulaExamples.get(formula);
+      if (!body) return escapeHTML(original);
+      return `<span class="formula ${display ? 'block' : ''}" data-formula="${escapeHTML(original)}" title="右键复制公式源码"><math xmlns="http://www.w3.org/1998/Math/MathML" display="${display ? 'block' : 'inline'}" aria-label="${escapeHTML(formula)}">${body}</math></span>`;
+    }
+    function inline(s) {
+      const tokens = [];
+      const keep = html => { tokens.push(html); return `\uE000${tokens.length - 1}\uE001`; };
+      s = s.replace(/`([^`]+)`/g, (_, code) => keep('<code>' + escapeHTML(code) + '</code>'));
+      s = s.replace(/\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\]|\\\([^\n]*?\\\)|(?<![\\$])\$(?!\s|\$)[^\n$]+?\$(?!\d)/g, original => keep(mathHTML(original)));
+      s = s.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, path) => {
+        const src = path === './images/diagram.svg' ? sampleImage : /^(?:https?:|javascript:)/i.test(path) ? '' : path;
+        return keep(`<img class="local-image" src="${escapeHTML(src)}" alt="${escapeHTML(alt)}" title="点击放大图片"><span class="image-fallback" hidden>无法显示图片：${escapeHTML(path)}</span>`);
+      });
+      s = escapeHTML(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\*(.+?)\*/g, '<em>$1</em>').replace(/~~(.+?)~~/g, '<del>$1</del>').replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+      return s.replace(/\uE000(\d+)\uE001/g, (_, index) => tokens[Number(index)]);
+    }
     function render(source) {
       const lines = source.replace(/\r\n?/g, '\n').split('\n');
       let out = '', paragraph = [], list = '', items = [], table = [];
@@ -532,6 +648,7 @@
       catch { return new TextDecoder('gb18030', { fatal: true }).decode(bytes); }
     }
     async function openFile(file) {
+      captureBookmark();
       if (!/\.(md|markdown|mdown|txt)$/i.test(file.name)) return;
       const key = [file.webkitRelativePath || file.name, file.size, file.lastModified].join(':');
       const existing = tabs.findIndex(tab => tab.fileKey === key);
@@ -572,6 +689,37 @@
         heading?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }
     });
+    const imageDialog = document.getElementById('imageDialog');
+    page.addEventListener('click', event => {
+      const image = event.target.closest('.local-image');
+      if (!image) return;
+      event.preventDefault();
+      document.getElementById('enlargedImage').src = image.src;
+      imageDialog.showModal();
+    });
+    page.addEventListener('error', event => {
+      if (!event.target.matches('.local-image')) return;
+      event.target.hidden = true;
+      event.target.nextElementSibling.hidden = false;
+    }, true);
+    document.getElementById('closeImage').onclick = () => imageDialog.close();
+    const formulaMenu = document.getElementById('formulaMenu');
+    let copiedFormula = '';
+    page.addEventListener('contextmenu', event => {
+      const formula = event.target.closest('.formula');
+      if (!formula) return;
+      event.preventDefault(); copiedFormula = formula.dataset.formula;
+      formulaMenu.style.left = Math.min(event.clientX, innerWidth - 160) + 'px';
+      formulaMenu.style.top = Math.min(event.clientY, innerHeight - 45) + 'px';
+      formulaMenu.hidden = false;
+    });
+    formulaMenu.onclick = async () => {
+      try { await navigator.clipboard.writeText(copiedFormula); }
+      catch { prompt('复制公式源码', copiedFormula); }
+      formulaMenu.hidden = true;
+    };
+    document.addEventListener('click', event => { if (event.target !== formulaMenu) formulaMenu.hidden = true; });
+    restoreSession();
     drawTabs(); drawPage();
   </script>
 </body>

@@ -19,6 +19,20 @@ if ! grep -q 'is_cjk_emphasis_punctuation' "$parser"; then
   git -C "$checkout" apply "$PWD/cmark-cjk-emphasis.patch"
 fi
 
+mathjax_checkout="$PWD/.build/checkouts/mathjaxswift"
+mathjax_expected="00e9c3df6b1c82031c7fe3785028f3d21c0d73ba"
+mathjax_actual="$(git -C "$mathjax_checkout" rev-parse HEAD)"
+if [[ "$mathjax_actual" != "$mathjax_expected" ]]; then
+  print -u2 "MathJaxSwift revision changed: $mathjax_actual. Review the resource patch before building."
+  exit 1
+fi
+mathjax_constants="$mathjax_checkout/Sources/MathJaxSwift/Internal/Constants.swift"
+if ! grep -q 'LightMD packaged resources' "$mathjax_constants"; then
+  chmod u+w "$mathjax_constants"
+  git -C "$mathjax_checkout" apply --check "$PWD/mathjax-app-resources.patch"
+  git -C "$mathjax_checkout" apply "$PWD/mathjax-app-resources.patch"
+fi
+
 swift run -c release CJKParserCheck
 swift build -c release --product LightMD
 bundle="$PWD/LightMD.app"
@@ -51,6 +65,10 @@ mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources/zh-Hans.lproj"
 cp .build/release/LightMD "$bundle/Contents/MacOS/LightMD"
 cp Info.plist "$bundle/Contents/Info.plist"
 cp zh-Hans.lproj/Localizable.strings "$bundle/Contents/Resources/zh-Hans.lproj/Localizable.strings"
+ditto .build/release/MathJaxSwift_MathJaxSwift.bundle "$bundle/Contents/Resources/MathJaxSwift_MathJaxSwift.bundle"
+mkdir -p "$bundle/Contents/Resources/Licenses"
+cp .build/checkouts/mathjaxswift/LICENSE.md "$bundle/Contents/Resources/Licenses/MathJaxSwift.txt"
+cp .build/checkouts/SwiftDraw/LICENSE.txt "$bundle/Contents/Resources/Licenses/SwiftDraw.txt"
 codesign --force --deep --sign - "$bundle"
 codesign --verify --deep --strict "$bundle"
 print "Built $bundle with CJK Markdown emphasis support."

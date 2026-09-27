@@ -8,6 +8,8 @@
 - 启动时为阅读模式，右侧目录默认收起。阅读与编辑模式之间有滑动过渡；切入双栏编辑时，源码初始占 40%、预览占 60%，分隔线仍可拖动。系统开启「减少动态效果」时直接切换。
 - 拖动分隔线时源码与预览都必须实时换行，不再冻结源码宽度。未选中标签悬停时文字变深并显示关闭按钮。
 - 已有路径的文件停止输入约 1 秒后自动保存；保留编码、外部修改检测和失败时的草稿。未命名文件首次选择位置后才自动保存。
+- 启动恢复上次标签、当前选择和阅读位置；未命名或未成功写入的草稿写入本地会话。已有外部冲突在连续重启后也必须保留，不能因重新读取磁盘而清除。
+- 公式支持四种分隔符，异步离线排版；原文和复制源码不经过公式渲染改写。本地图片按比例显示，点击快速查看原图。
 - 修改这些行为时，同步更新 `LightMD.swift`、`README.md` 中相关说明，以及项目现有的 `LightMD-preview.html`。不要为同一界面另建预览文件。
 
 ## 每次修改可见界面
@@ -27,7 +29,8 @@
 
 - Finder 对 `.md` 的默认打开应用是 `/Applications/LightMD.app`。仅更新项目目录内的 `LightMD.app`，用户仍会打开旧版。应用代码变更后，更新 `Info.plist` 版本号，并运行 `./build.sh`；脚本会运行解析检查、构建签名，并在 `/Applications/LightMD.app` 已存在且 bundle ID 匹配时更新该安装版。
 - 安装后核对 `/Applications/LightMD.app` 的版本、签名，并确认系统对 `.md` 文件解析到该路径。保持 bundle ID `local.lightmd.reader`，使既有默认打开偏好继续指向安装版。
-- `build.sh` 会对固定版本的 Markdown 解析器应用 `cmark-cjk-emphasis.patch`。不要只运行 `swift build` 就视为完整发布。
+- `build.sh` 会对固定版本的 Markdown 解析器应用 `cmark-cjk-emphasis.patch`。公式资源另有固定版本的 `mathjax-app-resources.patch`，必须放进应用标准 Resources 目录；数字正则由 `FormulaConfiguration` 显式设置，避免依赖默认值误吞公式符号。不要只运行 `swift build` 就视为完整发布。
+- 本轮及以后涉及公式、图片、会话时运行 `python3 Checks/Features/run.py`；它使用 Release 编译，不显示测试窗口、不读写用户真实会话。
 
 ## 文件位置
 

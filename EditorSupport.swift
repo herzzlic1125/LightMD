@@ -217,6 +217,8 @@ final class ScrollSyncController {
     private var sourceObserver: NSObjectProtocol?
     private var previewObserver: NSObjectProtocol?
     private var revealPreview: ((String) -> Void)?
+    private var onBookmark: ((ReadingBookmark) -> Void)?
+    private var queuedRestoration: (tabID: UUID, bookmark: ReadingBookmark)?
     private var pendingSide: Side?
     private var updateScheduled = false
     private var generation: UInt64 = 0
@@ -259,12 +261,52 @@ final class ScrollSyncController {
         sourceObserver = observe(scroll, side: .source)
     }
 
-    func attachPreview(_ scroll: NSScrollView, reveal: @escaping (String) -> Void) {
+    func attachPreview(_ scroll: NSScrollView, tabID: UUID,
+                       reveal: @escaping (String) -> Void,
+                       onBookmark: @escaping (ReadingBookmark) -> Void) {
         revealPreview = reveal
-        guard preview !== scroll else { return }
+        self.onBookmark = onBookmark
+        guard preview !== scroll else {
+            applyQueuedRestoration(for: tabID)
+            return
+        }
         if let previewObserver { NotificationCenter.default.removeObserver(previewObserver) }
         preview = scroll
         previewObserver = observe(scroll, side: .preview)
+        applyQueuedRestoration(for: tabID)
+    }
+
+    func queueRestoration(_ bookmark: ReadingBookmark?, for tabID: UUID) {
+        cancelPending()
+        queuedRestoration = bookmark.map { (tabID, $0) }
+    }
+
+    private func applyQueuedRestoration(for tabID: UUID) {
+        guard let queuedRestoration, queuedRestoration.tabID == tabID else { return }
+        self.queuedRestoration = nil
+        let bookmark = queuedRestoration.bookmark
+        if bookmark.atTop {
+            if let preview { scroll(preview, to: 0) }
+            return
+        }
+        pendingPosition = Position(path: bookmark.path, fraction: CGFloat(bookmark.fraction),
+                                   atBottom: bookmark.atBottom)
+        pendingPreviewIntent = true
+        applyPendingPosition()
+    }
+
+    func currentBookmark() -> ReadingBookmark? {
+        guard let preview else { return nil }
+        let y = preview.contentView.bounds.minY
+        if y <= 0.5 { return ReadingBookmark(path: "0", fraction: 0, atTop: true, atBottom: false) }
+        let maximum = max(0, (preview.documentView?.frame.height ?? 0) - preview.contentView.bounds.height)
+        if maximum > 0 && y >= maximum - 0.5 {
+            let last = sourceSpans.max { $0.value.end < $1.value.end }?.key ?? "0"
+            return ReadingBookmark(path: last, fraction: 1, atTop: false, atBottom: true)
+        }
+        guard let position = previewPosition(at: y) else { return nil }
+        return ReadingBookmark(path: position.path, fraction: Double(position.fraction),
+                               atTop: false, atBottom: false)
     }
 
     func detachSource() {
@@ -357,6 +399,7 @@ final class ScrollSyncController {
             pendingPosition = nil
             pendingPreviewIntent = false
             requestedRoot = nil
+            if let bookmark = currentBookmark() { onBookmark?(bookmark) }
         }
         guard isActive, !isResizing else { return }
         if side == .source { pendingPreviewIntent = false }
@@ -534,6 +577,7 @@ final class ScrollSyncController {
         guard abs(view.contentView.bounds.origin.y - target) >= 0.5 else { return }
         view.contentView.scroll(to: NSPoint(x: view.contentView.bounds.origin.x, y: target))
         view.reflectScrolledClipView(view.contentView)
+        if view === preview, let bookmark = currentBookmark() { onBookmark?(bookmark) }
     }
 
     private func applyPendingPosition() {

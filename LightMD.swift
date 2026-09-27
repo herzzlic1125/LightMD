@@ -3,6 +3,7 @@ import AppKit
 import UniformTypeIdentifiers
 import Markdown
 import CoreFoundation
+import QuickLook
 
 func sameSourceBytes(_ first: String, _ second: String) -> Bool {
     first.utf8.elementsEqual(second.utf8)
@@ -135,13 +136,15 @@ struct ReaderTab: Identifiable {
     var editRevision: UInt64
     var previewID: UUID
     var autoSaveError: String?
+    var mathTokens: [String: MathToken]
 
     init(id: UUID = UUID(), url: URL? = nil, source: String = "", document: Document? = nil,
          outline: [OutlineEntry] = [], index: [IndexedBlock] = [], plainLines: [String]? = nil,
          scrollSpans: [String: SourceLineSpan] = [:],
          encodingName: String = "UTF-8", stamp: FileStamp? = nil,
          savedSource: String = "", savedData: Data? = nil, externalConflict: Bool = false,
-         editRevision: UInt64 = 0, previewID: UUID = UUID()) {
+         editRevision: UInt64 = 0, previewID: UUID = UUID(),
+         mathTokens: [String: MathToken] = [:]) {
         self.id = id
         self.url = url
         self.source = source
@@ -158,6 +161,7 @@ struct ReaderTab: Identifiable {
         self.editRevision = editRevision
         self.previewID = previewID
         self.autoSaveError = nil
+        self.mathTokens = mathTokens
     }
 
     var title: String { url?.lastPathComponent ?? "未命名" }
@@ -167,7 +171,14 @@ struct ReaderTab: Identifiable {
 @MainActor
 final class ReaderState: ObservableObject {
     @Published var tabs: [ReaderTab]
-    @Published var selectedID: UUID
+    @Published var selectedID: UUID {
+        willSet {
+            if selectedID != newValue, let bookmark = captureCurrentBookmark?() {
+                readingBookmarks[selectedID] = bookmark
+            }
+        }
+        didSet { if selectedID != oldValue { scheduleSessionWrite() } }
+    }
     @Published var fontSize: CGFloat = 16
     @Published var showsOutline = false
     @Published var isEditing = false
@@ -176,20 +187,32 @@ final class ReaderState: ObservableObject {
     @Published var searchHitIndex = 0
     @Published var navigationRequest: NavigationRequest?
     @Published var error: String?
+    @Published var imagePreviewURL: URL?
 
     private var fileTimer: Timer?
     private var pendingRefresh: [UUID: Task<Void, Never>] = [:]
     private var pendingParse: [UUID: Task<Void, Never>] = [:]
     private var pendingAutoSave: [UUID: Task<Void, Never>] = [:]
+    private var pendingSessionWrite: Task<Void, Never>?
+    private var readingBookmarks: [UUID: ReadingBookmark] = [:]
+    private let sessionStore: SessionStore
+    let formulas = FormulaCache()
+    private let canWriteSession: Bool
+    var captureCurrentBookmark: (() -> ReadingBookmark?)?
     var beforeReload: ((UUID) -> Void)?
     var afterReload: ((UUID) -> Void)?
     var beforeModeChange: (() -> Void)?
     var afterModeChange: (() -> Void)?
 
-    init() {
-        let first = ReaderTab()
-        tabs = [first]
-        selectedID = first.id
+    init(sessionStore: SessionStore = SessionStore()) {
+        self.sessionStore = sessionStore
+        let loaded = sessionStore.load()
+        let recovered = Self.restore(loaded.session)
+        tabs = recovered.tabs
+        selectedID = recovered.selectedID
+        readingBookmarks = recovered.bookmarks
+        canWriteSession = loaded.canWrite
+        error = loaded.error
         fileTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.pollFiles() }
         }
@@ -200,6 +223,50 @@ final class ReaderState: ObservableObject {
     var currentDocument: Document? { currentTab?.document }
     var currentOutline: [OutlineEntry] { currentTab?.outline ?? [] }
     var currentLines: [String]? { currentTab?.plainLines }
+    var currentMathTokens: [String: MathToken] { currentTab?.mathTokens ?? [:] }
+    func bookmark(for tabID: UUID) -> ReadingBookmark? { readingBookmarks[tabID] }
+
+    func recordBookmark(_ bookmark: ReadingBookmark, in tabID: UUID) {
+        guard readingBookmarks[tabID] != bookmark else { return }
+        readingBookmarks[tabID] = bookmark
+        scheduleSessionWrite()
+    }
+
+    private func sessionSnapshot() -> SavedSession {
+        let selectedIndex = tabs.firstIndex { $0.id == selectedID } ?? 0
+        let items = tabs.map { tab in
+            let draft = tab.isDirty || tab.url == nil ? tab.source : nil
+            return SavedTab(path: tab.url?.path, draft: draft,
+                            baselineSHA256: draft != nil ? tab.savedData.map(SessionStore.fingerprint) : nil,
+                            bookmark: readingBookmarks[tab.id], externalConflict: tab.externalConflict)
+        }
+        return SavedSession(version: 1, selectedIndex: selectedIndex, tabs: items)
+    }
+
+    private func scheduleSessionWrite() {
+        guard canWriteSession else { return }
+        pendingSessionWrite?.cancel()
+        pendingSessionWrite = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: 450_000_000) }
+            catch { return }
+            _ = self?.saveSessionNow()
+        }
+    }
+
+    @discardableResult
+    func saveSessionNow() -> Bool {
+        guard canWriteSession else { return false }
+        if let bookmark = captureCurrentBookmark?() { readingBookmarks[selectedID] = bookmark }
+        pendingSessionWrite?.cancel()
+        pendingSessionWrite = nil
+        do {
+            try sessionStore.save(sessionSnapshot())
+            return true
+        } catch {
+            self.error = "无法保存会话与草稿：\(error.localizedDescription)"
+            return false
+        }
+    }
     func toggleMode() {
         beforeModeChange?()
         isEditing.toggle()
@@ -246,6 +313,14 @@ final class ReaderState: ObservableObject {
         return node.children.map { plainTitle($0) }.joined()
     }
 
+    private static func readableTitle(_ node: Markup, tokens: [String: MathToken]) -> String {
+        var title = plainTitle(node)
+        for token in tokens.values {
+            title = title.replacingOccurrences(of: token.marker, with: token.original)
+        }
+        return title
+    }
+
     private static func slug(_ title: String) -> String {
         var output = ""
         var lastWasHyphen = false
@@ -261,20 +336,21 @@ final class ReaderState: ObservableObject {
         return output.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     }
 
-    private static func collectHeadings(_ node: Markup, path: String, into entries: inout [OutlineEntry]) {
+    private static func collectHeadings(_ node: Markup, path: String,
+                                        tokens: [String: MathToken], into entries: inout [OutlineEntry]) {
         if let heading = node as? Heading {
-            entries.append(OutlineEntry(id: path, title: plainTitle(heading), level: heading.level,
+            entries.append(OutlineEntry(id: path, title: readableTitle(heading, tokens: tokens), level: heading.level,
                                         slug: ""))
         }
         for (index, child) in node.children.enumerated() {
-            collectHeadings(child, path: "\(path).\(index)", into: &entries)
+            collectHeadings(child, path: "\(path).\(index)", tokens: tokens, into: &entries)
         }
     }
 
-    private static func outline(for document: Document) -> [OutlineEntry] {
+    private static func outline(for document: Document, tokens: [String: MathToken] = [:]) -> [OutlineEntry] {
         var entries: [OutlineEntry] = []
         for (index, block) in document.children.enumerated() {
-            collectHeadings(block, path: String(index), into: &entries)
+            collectHeadings(block, path: String(index), tokens: tokens, into: &entries)
         }
         var counts: [String: Int] = [:]
         return entries.map { entry in
@@ -286,19 +362,22 @@ final class ReaderState: ObservableObject {
         }
     }
 
-    private static func index(for document: Document) -> [IndexedBlock] {
+    private static func index(for document: Document, tokens: [String: MathToken] = [:]) -> [IndexedBlock] {
         document.children.enumerated().map { index, block in
-            IndexedBlock(path: String(index), text: plainTitle(block))
+            IndexedBlock(path: String(index), text: readableTitle(block, tokens: tokens))
         }
     }
 
-    private static func scrollSpans(for document: Document) -> [String: SourceLineSpan] {
+    private static func scrollSpans(for document: Document,
+                                    tokens: [String: MathToken] = [:]) -> [String: SourceLineSpan] {
         var lines: [String: SourceLineSpan] = [:]
         func collect(_ block: Markup, path: String) {
             if let range = block.range {
                 let end = range.upperBound.line + (range.upperBound.column > 1 ? 1 : 0)
+                let embedded = tokens.values.filter { plainTitle(block).contains($0.marker) }
                 lines[path] = SourceLineSpan(start: range.lowerBound.line,
-                                             end: max(range.lowerBound.line + 1, end))
+                                             end: max(range.lowerBound.line + 1,
+                                                      max(end, embedded.map { $0.lastLine + 1 }.max() ?? end)))
             }
             if block is OrderedList || block is UnorderedList || block is ListItem || block is BlockQuote {
                 for (index, child) in block.children.enumerated() {
@@ -363,12 +442,75 @@ final class ReaderState: ObservableObject {
                              encodingName: encoding, stamp: stamp,
                              savedSource: text, savedData: data)
         }
-        let document = Document(parsing: text)
+        let prepared = MathMarkup.prepare(text)
+        let document = Document(parsing: prepared.text)
         return ReaderTab(id: id, url: url, source: text, document: document,
-                         outline: outline(for: document), index: index(for: document),
-                         scrollSpans: scrollSpans(for: document),
+                         outline: outline(for: document, tokens: prepared.tokens),
+                         index: index(for: document, tokens: prepared.tokens),
+                         scrollSpans: scrollSpans(for: document, tokens: prepared.tokens),
                          encodingName: encoding, stamp: stamp,
-                         savedSource: text, savedData: data)
+                         savedSource: text, savedData: data, mathTokens: prepared.tokens)
+    }
+
+    private static func parseDraft(_ tab: inout ReaderTab) {
+        if tab.url?.pathExtension.lowercased() == "txt" {
+            tab.mathTokens = [:]
+            let lines = tab.source.replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n")
+                .components(separatedBy: "\n")
+            tab.document = nil
+            tab.plainLines = lines
+            tab.outline = []
+            tab.index = lines.enumerated().map { IndexedBlock(path: String($0.offset), text: $0.element) }
+            tab.scrollSpans = Dictionary(uniqueKeysWithValues: lines.indices.map {
+                (String($0), SourceLineSpan(start: $0 + 1, end: $0 + 2))
+            })
+        } else {
+            let prepared = MathMarkup.prepare(tab.source)
+            let document = Document(parsing: prepared.text)
+            tab.mathTokens = prepared.tokens
+            tab.document = document
+            tab.plainLines = nil
+            tab.outline = outline(for: document, tokens: prepared.tokens)
+            tab.index = index(for: document, tokens: prepared.tokens)
+            tab.scrollSpans = scrollSpans(for: document, tokens: prepared.tokens)
+        }
+        tab.previewID = UUID()
+    }
+
+    private static func restore(_ session: SavedSession?) ->
+        (tabs: [ReaderTab], selectedID: UUID, bookmarks: [UUID: ReadingBookmark]) {
+        var restored: [ReaderTab] = []
+        var bookmarks: [UUID: ReadingBookmark] = [:]
+        var selected: UUID?
+        for (position, item) in (session?.tabs ?? []).enumerated() {
+            let url = item.path.flatMap { $0.hasPrefix("/") ? URL(fileURLWithPath: $0) : nil }
+            var tab: ReaderTab?
+            if let url, let data = try? Data(contentsOf: url), let decoded = try? decode(data) {
+                var loaded = makeTab(url: url, text: decoded.text, encoding: decoded.name,
+                                     stamp: stamp(for: url), data: data)
+                if let draft = item.draft, !sameSourceBytes(draft, decoded.text) {
+                    loaded.source = draft
+                    loaded.editRevision = 1
+                    loaded.externalConflict = item.externalConflict == true || item.baselineSHA256 != SessionStore.fingerprint(data)
+                    parseDraft(&loaded)
+                }
+                tab = loaded
+            } else if let draft = item.draft {
+                var loaded = ReaderTab(url: url, source: draft,
+                                       savedSource: url != nil && draft.isEmpty ? "\u{0}" : "",
+                                       externalConflict: url != nil)
+                loaded.editRevision = 1
+                parseDraft(&loaded)
+                tab = loaded
+            }
+            guard let tab else { continue }
+            restored.append(tab)
+            if let bookmark = item.bookmark { bookmarks[tab.id] = bookmark }
+            if position == session?.selectedIndex { selected = tab.id }
+        }
+        if restored.isEmpty { restored = [ReaderTab()] }
+        return (restored, selected ?? restored[0].id, bookmarks)
     }
 
     private static func encode(_ text: String, as name: String) -> Data? {
@@ -397,6 +539,7 @@ final class ReaderState: ObservableObject {
         tabs[index].source = source
         if !tabs[index].isDirty { tabs[index].autoSaveError = nil }
         tabs[index].editRevision &+= 1
+        scheduleSessionWrite()
         let revision = tabs[index].editRevision
         pendingParse[tabID]?.cancel()
         pendingParse[tabID] = Task { @MainActor [weak self] in
@@ -423,6 +566,7 @@ final class ReaderState: ObservableObject {
               tabs[index].editRevision == revision else { return }
         let source = tabs[index].source
         if tabs[index].url?.pathExtension.lowercased() == "txt" {
+            tabs[index].mathTokens = [:]
             let normalized = source.replacingOccurrences(of: "\r\n", with: "\n")
                 .replacingOccurrences(of: "\r", with: "\n")
             let lines = normalized.components(separatedBy: "\n")
@@ -432,11 +576,13 @@ final class ReaderState: ObservableObject {
             tabs[index].index = lines.enumerated().map { IndexedBlock(path: String($0.offset), text: $0.element) }
             tabs[index].scrollSpans = Dictionary(uniqueKeysWithValues: lines.indices.map { (String($0), SourceLineSpan(start: $0 + 1, end: $0 + 2)) })
         } else {
-            let document = Document(parsing: source)
+            let prepared = MathMarkup.prepare(source)
+            let document = Document(parsing: prepared.text)
+            tabs[index].mathTokens = prepared.tokens
             tabs[index].document = document
-            tabs[index].outline = Self.outline(for: document)
-            tabs[index].index = Self.index(for: document)
-            tabs[index].scrollSpans = Self.scrollSpans(for: document)
+            tabs[index].outline = Self.outline(for: document, tokens: prepared.tokens)
+            tabs[index].index = Self.index(for: document, tokens: prepared.tokens)
+            tabs[index].scrollSpans = Self.scrollSpans(for: document, tokens: prepared.tokens)
             tabs[index].plainLines = nil
         }
         tabs[index].previewID = UUID()
@@ -474,6 +620,11 @@ final class ReaderState: ObservableObject {
     private func write(tabID: UUID, to url: URL, saveAs: Bool, automatic: Bool = false) -> Bool {
         guard let index = tabs.firstIndex(where: { $0.id == tabID }) else { return false }
         let tab = tabs[index]
+        if !saveAs && tab.externalConflict {
+            saveFailure("文件已在外部修改或无法读取，请使用「另存为…」保留当前草稿。",
+                        at: index, automatic: automatic)
+            return false
+        }
         if !saveAs, let baseline = tab.savedData {
             guard let disk = try? Data(contentsOf: url), disk == baseline else {
                 tabs[index].externalConflict = true
@@ -502,6 +653,7 @@ final class ReaderState: ObservableObject {
             tabs[index].encodingName = encoding
             tabs[index].externalConflict = false
             tabs[index].autoSaveError = nil
+            scheduleSessionWrite()
             pendingAutoSave[tabID]?.cancel()
             pendingAutoSave[tabID] = nil
             if pendingParse[tabID] != nil || saveAs {
@@ -568,6 +720,7 @@ final class ReaderState: ObservableObject {
         let tab = ReaderTab()
         tabs.append(tab)
         selectedID = tab.id
+        scheduleSessionWrite()
     }
 
     private func confirmDiscardChanges(in tabID: UUID) -> Bool {
@@ -588,10 +741,10 @@ final class ReaderState: ObservableObject {
     }
 
     func confirmCloseAll() -> Bool {
-        for tab in tabs where tab.isDirty {
-            if !confirmDiscardChanges(in: tab.id) { return false }
+        for tab in tabs where tab.isDirty && tab.url != nil && !tab.externalConflict {
+            if let url = tab.url { _ = write(tabID: tab.id, to: url, saveAs: false, automatic: true) }
         }
-        return true
+        return saveSessionNow()
     }
 
     func closeTab(_ id: UUID) {
@@ -606,10 +759,13 @@ final class ReaderState: ObservableObject {
         if tabs.count == 1 {
             tabs[0] = ReaderTab()
             selectedID = tabs[0].id
+            _ = saveSessionNow()
             return
         }
         tabs.remove(at: index)
+        readingBookmarks[id] = nil
         if selectedID == id { selectedID = tabs[min(index, tabs.count - 1)].id }
+        _ = saveSessionNow()
     }
 
     @discardableResult
@@ -637,6 +793,7 @@ final class ReaderState: ObservableObject {
             }
             selectedID = tab.id
             error = nil
+            scheduleSessionWrite()
             return tab.id
         } catch {
             self.error = "无法读取文件：\(newURL.path)\n\(error.localizedDescription)"
@@ -1114,6 +1271,7 @@ struct ReaderView: View {
                 let visibleSourceWidth = modeProgress * sourceWidth
                 let visibleDividerWidth = modeProgress * dividerWidth
                 let previewWidth = max(1, splitGeometry.size.width - modeProgress * modeInset)
+                let previewTabID = state.selectedID
                 HStack(spacing: 0) {
                     if editorMounted, let tabID = state.currentTab?.id {
                         MarkdownSourceEditor(text: state.currentTab?.source ?? "",
@@ -1160,7 +1318,11 @@ struct ReaderView: View {
                                 .equatable()
                                 .background(ScrollResolver {
                                     scrollKeeper.scrollView = $0
-                                    scrollSync.attachPreview($0, reveal: { proxy.scrollTo("document:\($0)", anchor: .top) })
+                                    scrollSync.attachPreview($0, tabID: previewTabID,
+                                                             reveal: { proxy.scrollTo("document:\($0)", anchor: .top) },
+                                                             onBookmark: { bookmark in
+                                        state.recordBookmark(bookmark, in: previewTabID)
+                                    })
                                 }
                                     .frame(width: 0, height: 0))
                                 .frame(width: textWidth(for: outlineInset, available: width), alignment: .leading)
@@ -1216,6 +1378,8 @@ struct ReaderView: View {
                                  onOutline: { state.showsOutline.toggle() })
             .frame(width: 0, height: 0))
         .environmentObject(state)
+        .environmentObject(state.formulas)
+        .quickLookPreview($state.imagePreviewURL)
         .environment(\.openURL, OpenURLAction { target in
             state.followLink(target)
             return .handled
@@ -1230,6 +1394,8 @@ struct ReaderView: View {
             return true
         }
         .onAppear {
+            state.captureCurrentBookmark = { [weak scrollSync] in scrollSync?.currentBookmark() }
+            scrollSync.queueRestoration(state.bookmark(for: state.selectedID), for: state.selectedID)
             settleOutline()
             settleMode()
             let keeper = scrollKeeper
@@ -1262,6 +1428,7 @@ struct ReaderView: View {
             transitionMode(to: editing)
         }
         .onChange(of: state.selectedID) { tabID in
+            scrollSync.queueRestoration(state.bookmark(for: tabID), for: tabID)
             settleOutline()
             settleMode()
             scrollSync.endDividerResize()
@@ -1297,6 +1464,8 @@ struct ReaderView: View {
             if let first = state.searchHits.first { state.navigate(to: first.path) }
         }
         .onDisappear {
+            _ = state.saveSessionNow()
+            state.captureCurrentBookmark = nil
             pendingModeCommit?.cancel()
             scrollSync.endDividerResize()
             scrollSync.isActive = false
@@ -1317,9 +1486,116 @@ struct ReaderView: View {
 
 struct MarkdownBlockView: View {
     @EnvironmentObject private var reader: ReaderState
+    @EnvironmentObject private var formulaCache: FormulaCache
+    @Environment(\.displayScale) private var displayScale
     let block: Markup
     let fontSize: CGFloat
     let path: String
+
+    private enum ParagraphPart {
+        case text([Markup])
+        case image(Markdown.Image)
+    }
+
+    private func paragraphParts(_ paragraph: Paragraph) -> [ParagraphPart] {
+        func hasImage(_ node: Markup) -> Bool {
+            node is Markdown.Image || node.children.contains(where: hasImage)
+        }
+        guard paragraph.children.contains(where: hasImage) else { return [] }
+        func split(_ node: Markup) -> [ParagraphPart] {
+            if let image = node as? Markdown.Image { return [.image(image)] }
+            guard hasImage(node) else { return [.text([node])] }
+            var output: [ParagraphPart] = []
+            for child in node.children {
+                for part in split(child) {
+                    if case .text(let children) = part {
+                        output.append(.text([node.withUncheckedChildren(children)]))
+                    } else { output.append(part) }
+                }
+            }
+            return output
+        }
+        var result: [ParagraphPart] = []
+        var text: [Markup] = []
+        func flush() {
+            if !text.map({ $0.format() }).joined().trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                result.append(.text(text))
+            }
+            text.removeAll()
+        }
+        for child in paragraph.children {
+            for part in split(child) {
+                if case .text(let children) = part { text.append(contentsOf: children) }
+                else { flush(); result.append(part) }
+            }
+        }
+        flush()
+        return result
+    }
+
+    private func alternativeText(_ node: Markup) -> String {
+        if let text = node as? Markdown.Text { return text.string }
+        return node.children.map { alternativeText($0) }.joined()
+    }
+
+    private func formulaText(_ content: String, size: CGFloat,
+                             strong: Bool, emphasized: Bool, heading: Bool) -> SwiftUI.Text {
+        guard content.contains("\u{E000}") else {
+            return styledReadingText(content, size: size, strong: strong,
+                                     emphasized: emphasized, heading: heading)
+        }
+        var result = SwiftUI.Text("")
+        var remaining = content[...]
+        while let range = remaining.range(of: "\u{E000}LM[0-9]+\u{E001}", options: .regularExpression) {
+            result = result + styledReadingText(String(remaining[..<range.lowerBound]), size: size,
+                                        strong: strong, emphasized: emphasized, heading: heading)
+            let marker = String(remaining[range])
+            if let token = reader.currentMathTokens[marker] {
+                switch formulaCache.result(for: token, fontSize: size, displayScale: displayScale) {
+                case .image(let rendered):
+                    result = result + SwiftUI.Text(SwiftUI.Image(nsImage: rendered.image).renderingMode(.template))
+                        .baselineOffset(rendered.baselineOffset)
+                        .accessibilityLabel(token.formula)
+                case .pending, .failure:
+                    result = result + styledReadingText(token.original, size: size, strong: strong,
+                                                emphasized: emphasized, heading: heading)
+                }
+            } else {
+                result = result + styledReadingText(marker, size: size, strong: strong,
+                                            emphasized: emphasized, heading: heading)
+            }
+            remaining = remaining[range.upperBound...]
+        }
+        result = result + styledReadingText(String(remaining), size: size, strong: strong,
+                                    emphasized: emphasized, heading: heading)
+        return result
+    }
+
+    @ViewBuilder private func displayedFormula(_ token: MathToken) -> some View {
+        switch formulaCache.result(for: token, fontSize: fontSize * 1.12, displayScale: displayScale) {
+        case .image(let rendered):
+            GeometryReader { geometry in
+                ScrollView(.horizontal) {
+                    SwiftUI.Image(nsImage: rendered.image)
+                        .renderingMode(.template)
+                        .interpolation(.high)
+                        .frame(minWidth: geometry.size.width)
+                        .accessibilityLabel(token.formula)
+                }
+            }
+            .frame(height: rendered.image.size.height + 10)
+            .contextMenu {
+                Button("复制公式源码") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(token.original, forType: .string)
+                }
+            }
+        case .pending, .failure:
+            Text(token.original)
+                .font(.system(size: fontSize * 0.9, design: .monospaced))
+                .textSelection(.enabled)
+        }
+    }
 
     private func attributedInline(_ node: Markup, size: CGFloat, strong: Bool = false,
                                   emphasized: Bool = false, heading: Bool = false) -> AttributedString {
@@ -1370,8 +1646,8 @@ struct MarkdownBlockView: View {
                         emphasized: Bool = false, heading: Bool = false) -> SwiftUI.Text {
         let pointSize = size ?? fontSize
         if let text = node as? Markdown.Text {
-            return styledReadingText(text.string, size: pointSize, strong: strong,
-                                     emphasized: emphasized, heading: heading)
+            return formulaText(text.string, size: pointSize, strong: strong,
+                               emphasized: emphasized, heading: heading)
         }
         if let code = node as? InlineCode {
             return SwiftUI.Text(code.code).font(.system(size: pointSize * 0.9, design: .monospaced))
@@ -1427,8 +1703,41 @@ struct MarkdownBlockView: View {
                     .lineSpacing(3)
                     .padding(.top, heading.level == 1 ? 0 : 4)
             } else if let paragraph = block as? Paragraph {
-                inline(paragraph)
-                    .lineSpacing(2)
+                let parts = paragraphParts(paragraph)
+                if parts.contains(where: { if case .image = $0 { return true }; return false }) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(parts.enumerated()), id: \.offset) { _, part in
+                            switch part {
+                            case .text(let children):
+                                children.reduce(SwiftUI.Text("")) { $0 + inline($1) }.lineSpacing(2)
+                            case .image(let image):
+                                MarkdownImageView(source: image.source ?? "", alternative: alternativeText(image),
+                                                  documentURL: reader.currentURL,
+                                                  onOpen: { reader.imagePreviewURL = $0 })
+                            }
+                        }
+                    }
+                } else if let text = Array(paragraph.children).first as? Markdown.Text,
+                   Array(paragraph.children).count == 1,
+                   let token = reader.currentMathTokens[text.string], token.display {
+                    displayedFormula(token)
+                } else {
+                    inline(paragraph)
+                        .lineSpacing(2)
+                        .contextMenu {
+                            ForEach(Array(reader.currentMathTokens.values.filter {
+                                paragraph.format().contains($0.marker)
+                            }.sorted {
+                                let content = paragraph.format()
+                                return content.range(of: $0.marker)!.lowerBound < content.range(of: $1.marker)!.lowerBound
+                            }.enumerated()), id: \.offset) { index, token in
+                                Button("复制公式源码 \(index + 1)") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(token.original, forType: .string)
+                                }
+                            }
+                        }
+                }
             } else if let list = block as? OrderedList {
                 let items = Array(list.children)
                 let lastNumber = Int(list.startIndex) + max(items.count - 1, 0)

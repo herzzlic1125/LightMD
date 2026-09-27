@@ -1,0 +1,19 @@
+diff --git a/Sources/MathJaxSwift/Internal/Constants.swift b/Sources/MathJaxSwift/Internal/Constants.swift
+--- a/Sources/MathJaxSwift/Internal/Constants.swift
++++ b/Sources/MathJaxSwift/Internal/Constants.swift
+@@ -95,7 +95,14 @@ internal struct Constants {
+   struct URLs {
+     
+     /// The URL of the mjn top-level directory.
+-    static let mjn = Bundle.module.url(forResource: Names.Modules.mjn, withExtension: nil)
++    static let mjn: URL? = {
++      // LightMD packaged resources must not depend on the build directory.
++      if let url = Bundle.main.url(forResource: "MathJaxSwift_MathJaxSwift", withExtension: "bundle"),
++         let packaged = Bundle(url: url) {
++        return packaged.url(forResource: Names.Modules.mjn, withExtension: nil)
++      }
++      return Bundle.module.url(forResource: Names.Modules.mjn, withExtension: nil)
++    }()
+     
+     /// The URL of the chtml bundle file.
+     static let chtmlBundle = mjn?.appendingPathComponent(Paths.chtmlBundleFile)
