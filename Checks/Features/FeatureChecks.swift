@@ -253,8 +253,18 @@ import MathJaxSwift
 
 @main @MainActor struct FeatureChecks {
     static func main() throws {
+        setbuf(stdout, nil)
         try SessionCheck.run()
         MathMarkupCheck.run()
         try FeatureRenderCheck.run()
+        var finished = false
+        var exportError: Error?
+        Task { @MainActor in
+            do { try await ExportChecks.run() }
+            catch { exportError = error }
+            finished = true
+        }
+        while !finished { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        if let exportError { throw exportError }
     }
 }

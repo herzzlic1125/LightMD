@@ -75,19 +75,38 @@ final class FormulaCache: ObservableObject {
     }
 }
 
-private final class FormulaWorker {
+enum FormulaExport {
+    static func svg(_ formula: String, display: Bool) async throws -> String {
+        try await FormulaWorker.shared.svg(formula, display: display)
+    }
+}
+
+// Engine access is confined to the serial queue.
+private final class FormulaWorker: @unchecked Sendable {
     static let shared = FormulaWorker()
     private let queue = DispatchQueue(label: "local.lightmd.math", qos: .userInitiated)
     private var engine: MathJax?
+
+    func svg(_ formula: String, display: Bool) async throws -> String {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                do { continuation.resume(returning: try self.convert(formula, display: display)) }
+                catch { continuation.resume(throwing: error) }
+            }
+        }
+    }
+
+    private func convert(_ formula: String, display: Bool) throws -> String {
+        if engine == nil { engine = try MathJax(preferredOutputFormats: [.svg]) }
+        return try engine!.tex2svg(formula, styles: false,
+            conversionOptions: ConversionOptions(display: display), inputOptions: FormulaConfiguration.inputOptions)
+    }
 
     func render(_ formula: String, display: Bool, xHeight: CGFloat, displayScale: CGFloat,
                 completion: @escaping (FormulaWorkResult) -> Void) {
         queue.async {
             do {
-                if self.engine == nil { self.engine = try MathJax(preferredOutputFormats: [.svg]) }
-                let options = FormulaConfiguration.inputOptions
-                let markup = try self.engine!.tex2svg(formula, styles: false,
-                    conversionOptions: ConversionOptions(display: display), inputOptions: options)
+                let markup = try self.convert(formula, display: display)
                 let geometry = try self.geometry(from: markup, xHeight: xHeight)
                 let image = try self.image(from: markup, size: geometry.size, scale: displayScale)
                 completion(.success(FormulaImage(image: image, baselineOffset: geometry.baseline)))

@@ -188,6 +188,8 @@ final class ReaderState: ObservableObject {
     @Published var navigationRequest: NavigationRequest?
     @Published var error: String?
     @Published var imagePreviewURL: URL?
+    @Published var isExportingPDF = false
+    @Published var pdfExportNotice: String?
 
     private var fileTimer: Timer?
     private var pendingRefresh: [UUID: Task<Void, Never>] = [:]
@@ -1374,8 +1376,10 @@ struct ReaderView: View {
         .background(WindowChrome(title: state.currentTab?.title ?? "未命名",
                                  isEditing: state.isEditing,
                                  showsOutline: state.showsOutline,
+                                 isExporting: state.isExportingPDF,
                                  onMode: { state.toggleMode() },
-                                 onOutline: { state.showsOutline.toggle() })
+                                 onOutline: { state.showsOutline.toggle() },
+                                 onExport: { state.exportPDF() })
             .frame(width: 0, height: 0))
         .environmentObject(state)
         .environmentObject(state.formulas)
@@ -1475,6 +1479,11 @@ struct ReaderView: View {
             state.beforeModeChange = nil
             state.afterModeChange = nil
         }
+        .alert("PDF 导出", isPresented: Binding(
+            get: { state.pdfExportNotice != nil },
+            set: { if !$0 { state.pdfExportNotice = nil } }
+        )) { Button("好") { state.pdfExportNotice = nil } }
+        message: { Text(state.pdfExportNotice ?? "") }
         .alert("操作失败", isPresented: Binding(
             get: { state.error != nil },
             set: { if !$0 { state.error = nil } }
@@ -1795,6 +1804,9 @@ struct MarkdownBlockView: View {
                     }
                 }
                 .frame(maxWidth: .infinity)
+            } else if let code = block as? CodeBlock,
+                      code.language?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "mermaid" {
+                MermaidBlockView(source: code.code)
             } else if let code = block as? CodeBlock {
                 ScrollView(.horizontal) {
                     Text(code.code)
@@ -1953,6 +1965,9 @@ struct LightMDApp: App {
                         .keyboardShortcut("s", modifiers: .command)
                     Button("另存为…") { reader.saveAsCurrent() }
                         .keyboardShortcut("s", modifiers: [.command, .shift])
+                    Button("导出 PDF…") { reader.exportPDF() }
+                        .keyboardShortcut("e", modifiers: [.command, .option])
+                        .disabled(reader.isExportingPDF)
                     Divider()
                     Button("关闭标签页") { reader.closeTab(reader.selectedID) }
                         .keyboardShortcut("w", modifiers: .command)

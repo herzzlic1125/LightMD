@@ -12,7 +12,9 @@ work = root / '.build/lightmd-feature-check'
 work.mkdir(parents=True, exist_ok=True)
 
 def run(*args):
-    subprocess.run([str(x) for x in args], cwd=root, check=True)
+    result = subprocess.run([str(x) for x in args], cwd=root)
+    if result.returncode:
+        raise SystemExit(f"{args[0]} failed with exit code {result.returncode}")
 
 # build.sh applies dependency patches. Use it before this check on a fresh checkout.
 run('swift', 'build', '-c', 'release', '--product', 'LightMD')
@@ -37,11 +39,13 @@ with (bundle / 'Contents/Info.plist').open('wb') as file:
     plistlib.dump(plist, file)
 run('swiftc', *flags, work / 'LightMD-test.swift',
     *[root / name for name in ['EditorSupport.swift', 'WindowChrome.swift', 'SessionStore.swift',
-                               'MathMarkup.swift', 'MathRenderer.swift', 'MediaSupport.swift']],
-    root / 'Checks/Features/FeatureChecks.swift', *objects, '-o', macos / 'FeatureCheck')
+                               'MathMarkup.swift', 'MathRenderer.swift', 'MediaSupport.swift',
+                               'WebRenderSupport.swift', 'MermaidSupport.swift', 'PDFExport.swift']],
+    root / 'Checks/Features/FeatureChecks.swift', root / 'Checks/Features/ExportChecks.swift', *objects, '-o', macos / 'FeatureCheck')
 resource_name = 'MathJaxSwift_MathJaxSwift.bundle'
 resource = release / resource_name
 run('ditto', resource, resources / resource_name)
+run('ditto', root / 'Assets/Mermaid', resources / 'Mermaid')
 run('codesign', '--force', '--deep', '--sign', '-', bundle)
 run('codesign', '--verify', '--deep', '--strict', bundle)
 # Prove bundled math works without the absolute build-directory fallback.

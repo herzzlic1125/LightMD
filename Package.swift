@@ -16,7 +16,7 @@ let package = Package(
             .product(name: "Markdown", package: "swift-markdown"),
             .product(name: "MathJaxSwift", package: "MathJaxSwift"),
             .product(name: "SwiftDraw", package: "SwiftDraw")
-        ], path: ".", exclude: ["LightMD.app", "LightMD_副本.app", "docs", "AGENTS.md", "Info.plist", "README.md", "Font-notes.md", "Checks", "cmark-cjk-emphasis.patch", "mathjax-app-resources.patch", "build.sh", "zh-Hans.lproj", "Assets", "LightMD-preview.html"], sources: ["LightMD.swift", "EditorSupport.swift", "WindowChrome.swift", "SessionStore.swift", "MathMarkup.swift", "MathRenderer.swift", "MediaSupport.swift"]),
+        ], path: ".", exclude: ["LightMD.app", "LightMD_副本.app", "docs", "AGENTS.md", "Info.plist", "README.md", "Font-notes.md", "Checks", "cmark-cjk-emphasis.patch", "mathjax-app-resources.patch", "build.sh", "zh-Hans.lproj", "Assets", "LightMD-preview.html"], sources: ["LightMD.swift", "EditorSupport.swift", "WindowChrome.swift", "SessionStore.swift", "MathMarkup.swift", "MathRenderer.swift", "MediaSupport.swift", "WebRenderSupport.swift", "MermaidSupport.swift", "PDFExport.swift"]),
         .executableTarget(name: "CJKParserCheck", dependencies: [
             .product(name: "Markdown", package: "swift-markdown")
         ], path: "Checks", exclude: ["Features"])

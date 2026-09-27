@@ -33,6 +33,13 @@ if ! grep -q 'LightMD packaged resources' "$mathjax_constants"; then
   git -C "$mathjax_checkout" apply "$PWD/mathjax-app-resources.patch"
 fi
 
+mermaid_expected="7a644017d37f93c8359790884e6b67fb1f747c78eb20475952404bd87190a3f8"
+mermaid_actual="$(shasum -a 256 Assets/Mermaid/mermaid.tiny.js | cut -d ' ' -f 1)"
+if [[ "$mermaid_actual" != "$mermaid_expected" ]]; then
+  print -u2 "Mermaid bundle checksum changed. Review the vendored runtime before building."
+  exit 1
+fi
+
 swift run -c release CJKParserCheck
 swift build -c release --product LightMD
 bundle="$PWD/LightMD.app"
@@ -65,10 +72,11 @@ mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources/zh-Hans.lproj"
 cp .build/release/LightMD "$bundle/Contents/MacOS/LightMD"
 cp Info.plist "$bundle/Contents/Info.plist"
 cp zh-Hans.lproj/Localizable.strings "$bundle/Contents/Resources/zh-Hans.lproj/Localizable.strings"
+ditto Assets/Mermaid "$bundle/Contents/Resources/Mermaid"
 ditto .build/release/MathJaxSwift_MathJaxSwift.bundle "$bundle/Contents/Resources/MathJaxSwift_MathJaxSwift.bundle"
 mkdir -p "$bundle/Contents/Resources/Licenses"
-cp .build/checkouts/mathjaxswift/LICENSE.md "$bundle/Contents/Resources/Licenses/MathJaxSwift.txt"
-cp .build/checkouts/SwiftDraw/LICENSE.txt "$bundle/Contents/Resources/Licenses/SwiftDraw.txt"
+install -m 644 .build/checkouts/mathjaxswift/LICENSE.md "$bundle/Contents/Resources/Licenses/MathJaxSwift.txt"
+install -m 644 .build/checkouts/SwiftDraw/LICENSE.txt "$bundle/Contents/Resources/Licenses/SwiftDraw.txt"
 codesign --force --deep --sign - "$bundle"
 codesign --verify --deep --strict "$bundle"
 print "Built $bundle with CJK Markdown emphasis support."

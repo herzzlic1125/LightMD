@@ -14,11 +14,24 @@ private struct CapsuleButtonStyle: ButtonStyle {
 private struct ChromeCapsuleControls: View {
     let isEditing: Bool
     let showsOutline: Bool
+    let isExporting: Bool
     let onMode: () -> Void
     let onOutline: () -> Void
+    let onExport: () -> Void
 
     var body: some View {
         HStack(spacing: 0) {
+            Button(action: onExport) {
+                Group {
+                    if isExporting { ProgressView().controlSize(.small) }
+                    else { Image(systemName: "square.and.arrow.up").font(.system(size: 16, weight: .regular)) }
+                }
+                .foregroundStyle(.primary)
+            }
+            .disabled(isExporting)
+            .help(isExporting ? "正在导出 PDF…" : "导出 PDF")
+            .accessibilityLabel(isExporting ? "正在导出 PDF" : "导出 PDF")
+
             Button(action: onMode) {
                 Image(systemName: isEditing ? "book" : "square.split.2x1")
                     .font(.system(size: 16, weight: .regular))
@@ -46,8 +59,10 @@ private final class WindowChromeView: NSView {
     var title = "未命名"
     var isEditing = false
     var showsOutline = true
+    var isExporting = false
     var onMode: (() -> Void)?
     var onOutline: (() -> Void)?
+    var onExport: (() -> Void)?
 
     private weak var installedWindow: NSWindow?
     private var accessory: NSTitlebarAccessoryViewController?
@@ -87,9 +102,9 @@ private final class WindowChromeView: NSView {
 
     private func install(in window: NSWindow) {
         installedWindow = window
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 78, height: 28))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 112, height: 28))
         let hosting = NSHostingView(rootView: makeControls())
-        hosting.frame = NSRect(x: 4, y: 1, width: 68, height: 26)
+        hosting.frame = NSRect(x: 4, y: 1, width: 102, height: 26)
         container.addSubview(hosting)
         controls = hosting
 
@@ -129,9 +144,10 @@ private final class WindowChromeView: NSView {
     }
 
     private func makeControls() -> ChromeCapsuleControls {
-        ChromeCapsuleControls(isEditing: isEditing, showsOutline: showsOutline,
+        ChromeCapsuleControls(isEditing: isEditing, showsOutline: showsOutline, isExporting: isExporting,
                               onMode: { [weak self] in self?.onMode?() },
-                              onOutline: { [weak self] in self?.onOutline?() })
+                              onOutline: { [weak self] in self?.onOutline?() },
+                              onExport: { [weak self] in self?.onExport?() })
     }
 
     func detach() {
@@ -151,8 +167,10 @@ struct WindowChrome: NSViewRepresentable {
     let title: String
     let isEditing: Bool
     let showsOutline: Bool
+    let isExporting: Bool
     let onMode: () -> Void
     let onOutline: () -> Void
+    let onExport: () -> Void
 
     func makeNSView(context: Context) -> NSView {
         let view = WindowChromeView()
@@ -173,8 +191,10 @@ struct WindowChrome: NSViewRepresentable {
         view.title = title
         view.isEditing = isEditing
         view.showsOutline = showsOutline
+        view.isExporting = isExporting
         view.onMode = onMode
         view.onOutline = onOutline
+        view.onExport = onExport
         view.refresh()
     }
 }

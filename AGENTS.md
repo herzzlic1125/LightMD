@@ -10,6 +10,8 @@
 - 已有路径的文件停止输入约 1 秒后自动保存；保留编码、外部修改检测和失败时的草稿。未命名文件首次选择位置后才自动保存。
 - 启动恢复上次标签、当前选择和阅读位置；未命名或未成功写入的草稿写入本地会话。已有外部冲突在连续重启后也必须保留，不能因重新读取磁盘而清除。
 - 公式支持四种分隔符，异步离线排版；原文和复制源码不经过公式渲染改写。本地图片按比例显示，点击快速查看原图。
+- 右上角胶囊从左到右为 PDF 导出、模式切换、目录。导出冻结当前源码快照，等待完整文档资源后按 A4 分页；禁止从懒加载视口截图代替完整 PDF。
+- Mermaid 使用打包的官方 Tiny runtime，在隐藏 WebKit 页面生成图表，原生界面展示缓存结果；代码错误保留源码。排版页面不显示、不置顶、不进入窗口菜单。
 - 修改这些行为时，同步更新 `LightMD.swift`、`README.md` 中相关说明，以及项目现有的 `LightMD-preview.html`。不要为同一界面另建预览文件。
 
 ## 每次修改可见界面
@@ -30,8 +32,14 @@
 - Finder 对 `.md` 的默认打开应用是 `/Applications/LightMD.app`。仅更新项目目录内的 `LightMD.app`，用户仍会打开旧版。应用代码变更后，更新 `Info.plist` 版本号，并运行 `./build.sh`；脚本会运行解析检查、构建签名，并在 `/Applications/LightMD.app` 已存在且 bundle ID 匹配时更新该安装版。
 - 安装后核对 `/Applications/LightMD.app` 的版本、签名，并确认系统对 `.md` 文件解析到该路径。保持 bundle ID `local.lightmd.reader`，使既有默认打开偏好继续指向安装版。
 - `build.sh` 会对固定版本的 Markdown 解析器应用 `cmark-cjk-emphasis.patch`。公式资源另有固定版本的 `mathjax-app-resources.patch`，必须放进应用标准 Resources 目录；数字正则由 `FormulaConfiguration` 显式设置，避免依赖默认值误吞公式符号。不要只运行 `swift build` 就视为完整发布。
-- 本轮及以后涉及公式、图片、会话时运行 `python3 Checks/Features/run.py`；它使用 Release 编译，不显示测试窗口、不读写用户真实会话。
+- 本轮及以后涉及公式、图片、会话、Mermaid 或 PDF 时运行 `python3 Checks/Features/run.py`；它使用 Release 编译，不显示测试窗口、不读写用户真实会话。
 
 ## 文件位置
 
 - 正式源码、`AGENTS.md`、`README.md`、构建脚本和应用包留在项目原有位置。其他新生成的独立文件放入项目根目录的 `docs`。
+
+## PDF 与图表维护
+
+- `WebRenderSupport.swift` 的打印必须使用 `canSpawnSeparateThread` 和异步 `runModal`。直接在主线程调用 WebKit 打印的 `run()` 会在页数尚未返回时读到无界范围。关闭打印面板和进度面板。
+- Mermaid 固定资源在 `Assets/Mermaid`；更换版本时同步校验和、许可、打包及 HTML 内嵌 runtime。
+- PDF 测试检查页数、长段落全文、跨页表格、尾段、图表文字与图片像素，使用 PDFKit 离屏检查，不打开预览窗口。
