@@ -22,6 +22,8 @@ release = (root / '.build/release').resolve()
 source = (root / 'LightMD.swift').read_text()
 assert source.count('@main\nstruct LightMDApp: App {') == 1
 (work / 'LightMD-test.swift').write_text(source.replace('@main\nstruct LightMDApp: App {', 'struct LightMDApp: App {'))
+chrome = (root / 'WindowChrome.swift').read_text().replace('private struct ChromeCapsuleControls: View', 'struct ChromeCapsuleControls: View')
+(work / 'WindowChrome-test.swift').write_text(chrome)
 flags = ['-O', '-parse-as-library', '-target', f'{platform.machine()}-apple-macosx13.0', '-I', str(release / 'Modules')]
 for checkout, subdir in [('swift-cmark', 'extensions/include'), ('swift-cmark', 'src/include'), ('swift-markdown', 'Sources/CAtomic/include')]:
     include = root / '.build/checkouts' / checkout / subdir
@@ -29,13 +31,13 @@ for checkout, subdir in [('swift-cmark', 'extensions/include'), ('swift-cmark', 
 objects = (release / 'LightMD.product/Objects.LinkFileList').read_text().splitlines()
 objects = [obj for obj in objects if '/LightMD.build/' not in obj]
 run('swiftc', *flags, work / 'LightMD-test.swift',
-    *[root / name for name in ['EditorSupport.swift', 'WindowChrome.swift', 'SessionStore.swift',
+    *[root / name for name in ['EditorSupport.swift', 'SessionStore.swift',
                                'MathMarkup.swift', 'MathRenderer.swift', 'MediaSupport.swift',
                                'WebRenderSupport.swift', 'MermaidSupport.swift', 'PDFExport.swift']],
-    root / 'Checks/Documentation/CaptureReading.swift', *objects, '-o', work / 'capture-reading')
+    work / 'WindowChrome-test.swift', root / 'Checks/Documentation/CaptureReading.swift', *objects, '-o', work / 'capture-reading')
 for language, kind, formulas, height in [
-    ('en', 'type', 0, 660), ('en', 'math', 3, 740),
-    ('zh', 'type', 0, 660), ('zh', 'math', 3, 740),
+    ('en', 'type', 0, 730), ('en', 'math', 3, 800),
+    ('zh', 'type', 0, 730), ('zh', 'math', 3, 800),
 ]:
     run(work / 'capture-reading',
         root / f'docs/examples/reading-{language}-{kind}.md',

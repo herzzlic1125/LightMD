@@ -19,17 +19,17 @@ LightMD 首先服务于我自己的日常阅读，因此功能和排版带有很
 ### 字体与间距
 
 <p align="center">
-  <img src="docs/images/reading-zh-type.png" width="960" alt="LightMD 中的中文字体、标题层级、行宽、段落间距和强调效果">
+  <img src="docs/images/reading-zh-type.png" width="960" alt="LightMD 完整 macOS 双栏编辑界面，包含窗口按钮、右上角三个按钮、Markdown 源码与中文排版预览">
   <br>
-  <sub>20 点字号的原生阅读视图 · <a href="docs/examples/reading-zh-type.md">示例 Markdown</a></sub>
+  <sub>20 点字号的完整双栏编辑界面 · <a href="docs/examples/reading-zh-type.md">示例 Markdown</a></sub>
 </p>
 
 ### LaTeX 公式
 
 <p align="center">
-  <img src="docs/images/reading-zh-math.png" width="960" alt="LightMD 中文正文中的行内数学公式和两条块级 LaTeX 公式">
+  <img src="docs/images/reading-zh-math.png" width="960" alt="LightMD 完整 macOS 双栏编辑界面，左侧为源码，右侧显示中文正文及 LaTeX 公式">
   <br>
-  <sub>20 点字号的原生公式渲染 · <a href="docs/examples/reading-zh-math.md">示例 Markdown</a></sub>
+  <sub>完整双栏编辑界面中的 20 点字号原生公式渲染 · <a href="docs/examples/reading-zh-math.md">示例 Markdown</a></sub>
 </p>
 
 ## 功能

@@ -19,17 +19,17 @@ This is a reader I made for my own daily use, with features and typography chose
 ### Typography and spacing
 
 <p align="center">
-  <img src="docs/images/reading-en-type.png" width="960" alt="English typography, heading hierarchy, line width, paragraph spacing and emphasis in LightMD">
+  <img src="docs/images/reading-en-type.png" width="960" alt="Complete LightMD macOS editing window with window controls, three upper-right buttons, Markdown source and English typography preview">
   <br>
-  <sub>Native reading view at 20 pt · <a href="docs/examples/reading-en-type.md">sample Markdown</a></sub>
+  <sub>Complete two-pane editing window at 20 pt · <a href="docs/examples/reading-en-type.md">sample Markdown</a></sub>
 </p>
 
 ### LaTeX in context
 
 <p align="center">
-  <img src="docs/images/reading-en-math.png" width="960" alt="English prose with inline mathematics and two displayed LaTeX equations in LightMD">
+  <img src="docs/images/reading-en-math.png" width="960" alt="Complete LightMD macOS editing window with Markdown source and live preview of inline and display LaTeX mathematics">
   <br>
-  <sub>Native math rendering at 20 pt · <a href="docs/examples/reading-en-math.md">sample Markdown</a></sub>
+  <sub>Complete two-pane editing window with native math rendering at 20 pt · <a href="docs/examples/reading-en-math.md">sample Markdown</a></sub>
 </p>
 
 ## What it does
