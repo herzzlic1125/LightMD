@@ -1,10 +1,16 @@
 import AppKit
-import CryptoKit
 import MathJaxSwift
 import SwiftDraw
 import SwiftUI
 
 enum FormulaConfiguration {
+    // The bundled MathJax TeX set omits the closed surface integral command.
+    // Define it only in the rendering input; retain the original source for editing,
+    // copying, saving and failure fallback. Keep operator/subscript semantics.
+    static func renderingInput(_ formula: String) -> String {
+        #"\newcommand{\oiint}{\mathop{∯}\nolimits}"# + formula
+    }
+
     // Pin the decimal pattern: the dependency's default dot matches any character,
     // swallowing adjacent operators, matrix columns and row separators.
     static var inputOptions: TeXInputProcessorOptions {
@@ -30,48 +36,146 @@ private enum FormulaWorkResult {
     case failure(String)
 }
 
-private final class FormulaBox: NSObject {
-    let value: FormulaResult
-    init(_ value: FormulaResult) { self.value = value }
+// Each leaf block observes only the formula jobs it actually requested.
+@MainActor
+final class FormulaUpdates: ObservableObject {
+    func refresh() { objectWillChange.send() }
+}
+
+private final class WeakFormulaUpdates {
+    weak var value: FormulaUpdates?
+    init(_ value: FormulaUpdates) { self.value = value }
 }
 
 @MainActor
 final class FormulaCache: ObservableObject {
-    @Published private(set) var revision = 0
-    private let cache = NSCache<NSString, FormulaBox>()
-    private var pending = Set<String>()
+    // Diagnostic counter, deliberately not published to the whole document.
+    private(set) var revision = 0
+    private struct Key: Hashable {
+        let formula: String
+        let display: Bool
+        let fontSize: CGFloat
+        let scale: CGFloat
+    }
+    private struct Cached {
+        let value: FormulaResult
+        let cost: Int
+        var access: UInt64
+    }
+    private var cache: [Key: Cached] = [:]
+    private var cost = 0
+    private var clock: UInt64 = 0
+    private let costLimit = 64 * 1024 * 1024
+    private let countLimit = 2048
+    private var visible: [Key] = []
+    private var background: [Key] = []
+    private var pending = Set<Key>()
+    private var urgent = Set<Key>()
+    private var running: Key?
+    private var waiting: [Key: [ObjectIdentifier: WeakFormulaUpdates]] = [:]
+    private var updates: [ObjectIdentifier: WeakFormulaUpdates] = [:]
+    private var updateScheduled = false
 
-    init() {
-        cache.countLimit = 240
-        cache.totalCostLimit = 40 * 1024 * 1024
+    private func key(for token: MathToken, fontSize: CGFloat, displayScale: CGFloat) -> Key {
+        Key(formula: token.formula, display: token.display, fontSize: fontSize,
+            scale: min(3, max(1, displayScale)))
     }
 
-    func result(for token: MathToken, fontSize: CGFloat, displayScale: CGFloat) -> FormulaResult {
-        let scale = min(3, max(1, displayScale))
-        let keyData = Data("\(token.display):\(fontSize):\(scale):\(token.formula)".utf8)
-        let key = SHA256.hash(data: keyData).map { String(format: "%02x", $0) }.joined()
-        if let stored = cache.object(forKey: key as NSString) { return stored.value }
-        guard pending.insert(key).inserted else { return .pending }
-        let xHeight = max(1, systemSerifFont(size: fontSize).xHeight)
-        FormulaWorker.shared.render(token.formula, display: token.display,
-                                    xHeight: xHeight, displayScale: scale) { [weak self] result in
-            Task { @MainActor in
-                guard let self else { return }
-                self.pending.remove(key)
-                let value: FormulaResult
-                switch result {
-                case .success(let image): value = .image(image)
-                case .failure(let message): value = .failure(message)
-                }
-                let cost: Int
-                if case .image(let rendered) = value {
-                    cost = Int(rendered.image.size.width * rendered.image.size.height * scale * scale * 4)
-                } else { cost = 1 }
-                self.cache.setObject(FormulaBox(value), forKey: key as NSString, cost: max(1, cost))
-                self.revision &+= 1
+    func result(for token: MathToken, fontSize: CGFloat, displayScale: CGFloat,
+                observer: FormulaUpdates? = nil) -> FormulaResult {
+        let key = key(for: token, fontSize: fontSize, displayScale: displayScale)
+        if var stored = cache[key] {
+            clock &+= 1
+            stored.access = clock
+            cache[key] = stored
+            return stored.value
+        }
+        if let observer {
+            waiting[key, default: [:]][ObjectIdentifier(observer)] = WeakFormulaUpdates(observer)
+        }
+        pending.insert(key)
+        if key != running, urgent.insert(key).inserted { visible.append(key) }
+        startNext()
+        return .pending
+    }
+
+    // A single background job runs at a time. New visible requests jump ahead of
+    // this queue, and switching document/size replaces obsolete prefetch work.
+    func prefetch(_ tokens: [MathToken], fontSize: CGFloat, displayScale: CGFloat) {
+        for key in background where key != running && !urgent.contains(key) {
+            pending.remove(key)
+        }
+        background.removeAll(keepingCapacity: true)
+        // Do not warm more entries than the cache can retain on enormous files.
+        var budget = countLimit
+        for token in tokens {
+            let key = key(for: token, fontSize: fontSize * (token.display ? 1.12 : 1),
+                          displayScale: displayScale)
+            guard cache[key] == nil, pending.insert(key).inserted else { continue }
+            background.append(key)
+            budget -= 1
+            if budget == 0 { break }
+        }
+        startNext()
+    }
+
+    private func startNext() {
+        guard running == nil else { return }
+        var next: Key?
+        while !visible.isEmpty {
+            let key = visible.removeFirst()
+            urgent.remove(key)
+            if pending.contains(key) { next = key; break }
+        }
+        if next == nil {
+            while !background.isEmpty {
+                let key = background.removeFirst()
+                if pending.contains(key) { next = key; break }
             }
         }
-        return .pending
+        guard let key = next else { return }
+        running = key
+        let xHeight = max(1, systemSerifFont(size: key.fontSize).xHeight)
+        FormulaWorker.shared.render(key.formula, display: key.display,
+                                    xHeight: xHeight, displayScale: key.scale) { [weak self] result in
+            Task { @MainActor in self?.finish(key, result: result) }
+        }
+    }
+
+    private func finish(_ key: Key, result: FormulaWorkResult) {
+        running = nil
+        pending.remove(key)
+        let value: FormulaResult
+        let entryCost: Int
+        switch result {
+        case .success(let image):
+            value = .image(image)
+            entryCost = max(1, Int(image.image.size.width * image.image.size.height * key.scale * key.scale * 4))
+        case .failure(let message): value = .failure(message); entryCost = 1
+        }
+        clock &+= 1
+        cache[key] = Cached(value: value, cost: entryCost, access: clock)
+        cost += entryCost
+        while cost > costLimit || cache.count > countLimit {
+            guard let oldest = cache.min(by: { $0.value.access < $1.value.access }) else { break }
+            cost -= oldest.value.cost
+            cache.removeValue(forKey: oldest.key)
+        }
+        revision &+= 1
+        if let observers = waiting.removeValue(forKey: key) {
+            updates.merge(observers, uniquingKeysWith: { _, newest in newest })
+            if !updateScheduled {
+                updateScheduled = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60) { [weak self] in
+                    guard let self else { return }
+                    self.updateScheduled = false
+                    let batch = self.updates
+                    self.updates.removeAll(keepingCapacity: true)
+                    for observer in batch.values { observer.value?.refresh() }
+                }
+            }
+        }
+        startNext()
     }
 }
 
@@ -86,6 +190,11 @@ private final class FormulaWorker: @unchecked Sendable {
     static let shared = FormulaWorker()
     private let queue = DispatchQueue(label: "local.lightmd.math", qos: .userInitiated)
     private var engine: MathJax?
+    private let markupCache: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
+        cache.totalCostLimit = 16 * 1024 * 1024
+        return cache
+    }()
 
     func svg(_ formula: String, display: Bool) async throws -> String {
         try await withCheckedThrowingContinuation { continuation in
@@ -97,9 +206,13 @@ private final class FormulaWorker: @unchecked Sendable {
     }
 
     private func convert(_ formula: String, display: Bool) throws -> String {
+        let key = "\(display):\(formula)" as NSString
+        if let cached = markupCache.object(forKey: key) { return cached as String }
         if engine == nil { engine = try MathJax(preferredOutputFormats: [.svg]) }
-        return try engine!.tex2svg(formula, styles: false,
+        let markup = try engine!.tex2svg(FormulaConfiguration.renderingInput(formula), styles: false,
             conversionOptions: ConversionOptions(display: display), inputOptions: FormulaConfiguration.inputOptions)
+        markupCache.setObject(markup as NSString, forKey: key, cost: markup.utf8.count)
+        return markup
     }
 
     func render(_ formula: String, display: Bool, xHeight: CGFloat, displayScale: CGFloat,
@@ -132,7 +245,8 @@ private final class FormulaWorker: @unchecked Sendable {
         }
         guard let width = attribute(#"width="([0-9.]+)ex""#),
               let height = attribute(#"height="([0-9.]+)ex""#),
-              let baseline = attribute(#"vertical-align:\s*(-?[0-9.]+)ex"#),
+              let baseline = attribute(#"vertical-align:\s*(-?[0-9.]+)ex"#)
+                ?? attribute(#"vertical-align:\s*(0)(?=\s*[;"])"#),
               width > 0, height > 0 else { throw FormulaError.invalidGeometry }
         let size = CGSize(width: ceil(width * xHeight), height: ceil(height * xHeight))
         guard size.width <= 8_192, size.height <= 8_192 else { throw FormulaError.tooLarge }

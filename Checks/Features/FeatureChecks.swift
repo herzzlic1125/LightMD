@@ -8,6 +8,37 @@ import Foundation
         let dir = URL(fileURLWithPath: CommandLine.arguments[1]).appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
+        let creationStore = SessionStore(url: dir.appendingPathComponent("creation-session.json"))
+        let creator = ReaderState(sessionStore: creationStore)
+        creator.updateSource("Keep this unsaved draft", in: creator.selectedID)
+        let draftBeforeCreation = creator.selectedID
+        for name in ["笔记.md", "hello.py", "notes.txt", "config.custom", "LICENSE"] {
+            let target = dir.appendingPathComponent(name)
+            precondition(creator.createFile(at: target))
+            precondition(creator.currentTab?.url == target && creator.isEditing)
+            precondition(try! Data(contentsOf: target).isEmpty)
+            let source = "# literal heading\nprint(\"hello\")\n"
+            creator.updateSource(source, in: creator.selectedID)
+            precondition(creator.saveCurrent())
+            precondition(try! String(contentsOf: target, encoding: .utf8) == source)
+            let selected = creator.selectedID
+            let count = creator.tabs.count
+            precondition(!creator.createFile(at: target))
+            precondition(creator.selectedID == selected && creator.tabs.count == count)
+            precondition(try! String(contentsOf: target, encoding: .utf8) == source)
+        }
+        precondition(creator.tabs.first(where: { $0.id == draftBeforeCreation })?.source == "Keep this unsaved draft")
+        let selectedBeforeFailure = creator.selectedID
+        precondition(!creator.createFile(at: dir.appendingPathComponent("missing/file.py")))
+        precondition(creator.selectedID == selectedBeforeFailure)
+        precondition(creator.saveSessionNow())
+        let restoredCreation = ReaderState(sessionStore: creationStore)
+        let python = restoredCreation.tabs.first { $0.url?.lastPathComponent == "hello.py" }!
+        precondition(python.document == nil && python.plainLines?.first == "# literal heading")
+        let markdown = restoredCreation.tabs.first { $0.url?.lastPathComponent == "笔记.md" }!
+        precondition(markdown.document != nil && markdown.plainLines == nil)
+        print("new_files_extensions_draft_preservation_no_overwrite_failure_and_restore=passed")
+
         let store = SessionStore(url: dir.appendingPathComponent("session.json"))
         let file = dir.appendingPathComponent("notes.md")
         try "# Original\n".write(to: file, atomically: true, encoding: .utf8)
@@ -137,13 +168,72 @@ import SwiftUI
 import ImageIO
 import Foundation
 import MathJaxSwift
+import Combine
+
+@MainActor struct FormulaSchedulingCheck {
+    static func run() {
+        func token(_ index: Int) -> MathToken {
+            MathToken(marker: "cache-\(index)", original: "$x_{\(index)}$", formula: "x_{\(index)}",
+                      display: false, firstLine: index + 1, lastLine: index + 1)
+        }
+        func wait(_ condition: () -> Bool) {
+            let deadline = Date().addingTimeInterval(15)
+            while !condition() && Date() < deadline { FeatureRenderCheck.pump(0.01) }
+            precondition(condition(), "Formula scheduler timed out")
+        }
+        let cache = FormulaCache()
+        let interested = FormulaUpdates(), unrelated = FormulaUpdates()
+        var relevant = 0, irrelevant = 0, global = 0
+        let subscriptions = [
+            interested.objectWillChange.sink { relevant += 1 },
+            unrelated.objectWillChange.sink { irrelevant += 1 },
+            cache.objectWillChange.sink { global += 1 }
+        ]
+        cache.prefetch((0..<360).map(token), fontSize: 16, displayScale: 2)
+        // Promote the tail of the background queue and coalesce duplicate demand.
+        for _ in 0..<20 {
+            _ = cache.result(for: token(359), fontSize: 16, displayScale: 2, observer: interested)
+        }
+        wait { cache.revision >= 2 }
+        precondition(cache.revision < 20)
+        guard case .image = cache.result(for: token(359), fontSize: 16, displayScale: 2) else {
+            preconditionFailure("Visible formula waited behind prefetch")
+        }
+        wait { cache.revision == 360 }
+        FeatureRenderCheck.pump(0.05)
+        precondition(relevant == 1 && irrelevant == 0 && global == 0)
+        for index in 0..<360 {
+            guard case .image = cache.result(for: token(index), fontSize: 16, displayScale: 2) else {
+                preconditionFailure("Long document evicted formula \(index)")
+            }
+        }
+        precondition(cache.revision == 360)
+        // Changing document cancels obsolete background jobs after the one in flight.
+        cache.prefetch((1000..<1360).map(token), fontSize: 16, displayScale: 2)
+        cache.prefetch([token(2000)], fontSize: 16, displayScale: 2)
+        wait { cache.revision == 362 }
+        FeatureRenderCheck.pump(0.1)
+        precondition(cache.revision == 362)
+        // Size and scale remain distinct; repeated requests use the same result.
+        _ = cache.result(for: token(359), fontSize: 24, displayScale: 2)
+        _ = cache.result(for: token(359), fontSize: 16, displayScale: 1)
+        wait { cache.revision == 364 }
+        guard case .image(let normal) = cache.result(for: token(359), fontSize: 16, displayScale: 2),
+              case .image(let larger) = cache.result(for: token(359), fontSize: 24, displayScale: 2) else {
+            preconditionFailure("Size-dependent cache missed")
+        }
+        precondition(larger.image.size.height > normal.image.size.height)
+        withExtendedLifetime(subscriptions) {}
+        print("formula_local_notifications_visible_priority_dedup_360_retained_cancel_size_scale=passed")
+    }
+}
 
 @MainActor struct FeatureRenderCheck {
     static func pump(_ seconds: Double) { RunLoop.main.run(until: Date().addingTimeInterval(seconds)) }
-    static func rendered(_ formula: String, size: CGFloat = 16) -> FormulaImage {
+    static func rendered(_ formula: String, size: CGFloat = 16, display: Bool = true) -> FormulaImage {
         let cache = FormulaCache()
         let token = MathToken(marker: "test", original: "$$\(formula)$$", formula: formula,
-                              display: true, firstLine: 1, lastLine: 1)
+                              display: display, firstLine: 1, lastLine: 1)
         for _ in 0..<100 {
             switch cache.result(for: token, fontSize: size, displayScale: 2) {
             case .image(let image): return image
@@ -158,7 +248,7 @@ import MathJaxSwift
         NSApp.setActivationPolicy(.prohibited)
         let engine = try MathJax(preferredOutputFormats: [.svg])
         func svg(_ input: String) throws -> String {
-            try engine.tex2svg(input, styles: false, conversionOptions: ConversionOptions(display: true),
+            try engine.tex2svg(FormulaConfiguration.renderingInput(input), styles: false, conversionOptions: ConversionOptions(display: true),
                                inputOptions: FormulaConfiguration.inputOptions)
         }
         func count(_ markup: String, _ node: String) -> Int {
@@ -170,12 +260,55 @@ import MathJaxSwift
             let markup = try svg(input)
             precondition(count(markup, "mtr") == 2 && count(markup, "mtd") == 4, "Rows or columns were lost")
         }
+        let gauss = #"\boxed{\oiint_S\mathbf D\cdot d\mathbf S=Q_{\text{inside}}}"#
+        let gaussSource = "再用高斯定律（Gauss’s law）联系场与电荷：\n\\[\n" + gauss + "\n\\]"
+        let preparedGauss = MathMarkup.prepare(gaussSource)
+        precondition(preparedGauss.tokens.count == 1)
+        precondition(preparedGauss.tokens.values.first?.formula == gauss)
+        precondition(preparedGauss.tokens.values.first?.display == true)
+        let gaussSVG = try svg(gauss)
+        precondition(!gaussSVG.contains("merror") && gaussSVG.contains("∯"))
+        precondition(count(gaussSVG, "msub") == 2 && count(gaussSVG, "menclose") == 1)
+        let integralSVG = try svg(#"\oiint_S"#)
+        precondition(integralSVG.contains("∯") && count(integralSVG, "msub") == 1)
+        let limitsSVG = try svg(#"\oiint\limits_S"#)
+        precondition(count(limitsSVG, "munder") == 1)
+        let customSVG = try svg(#"\renewcommand{\oiint}{\int}\oiint_S"#)
+        precondition(!customSVG.contains("merror") && !customSVG.contains("∯"))
+        print("gauss_closed_surface_integral_token_box_subscripts_limits_and_override=passed")
+        let tableSource = #"""
+        | 研究角度 | 核心量 | 主要问题 |
+        |---|---|---|
+        | 受力 | \(\mathbf E\) | 放入电荷会受多大力？ |
+        | 通量 | \(\mathbf D\) | 穿出封闭面的净通量是多少？ |
+        | 能量 | \(V\) | 移动电荷需要做多少功？ |
+        """#
+        let tableMath = MathMarkup.prepare(tableSource)
+        precondition(tableMath.tokens.count == 3 && tableMath.tokens.values.allSatisfy { !$0.display })
+        for formula in [#"\mathbf E"#, #"\mathbf D"#, #"\mathrm{ABC}"#, "1", "0", #"\infty"#] {
+            for display in [false, true] {
+                let image = rendered(formula, display: display)
+                precondition(image.image.size.width > 0 && image.image.size.height > 0)
+                if [#"\mathbf E"#, #"\mathbf D"#, "1"].contains(formula) {
+                    precondition(image.baselineOffset == 0)
+                } else { precondition(image.baselineOffset.isFinite) }
+                let bitmap = NSBitmapImageRep(data: image.image.tiffRepresentation!)!
+                var painted = 0
+                for x in 0..<bitmap.pixelsWide {
+                    for y in 0..<bitmap.pixelsHigh {
+                        if (bitmap.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.1 { painted += 1 }
+                    }
+                }
+                precondition(painted > 4)
+            }
+        }
+        print("table_inline_formulas_and_unitless_zero_baseline_pixels=passed")
         let arithmetic = try svg("1+2")
         precondition(count(arithmetic, "mn") == 2 && count(arithmetic, "mo") == 1)
         let decimals = try svg("1.25+.5+1{,}234.56")
         precondition(count(decimals, "mn") == 3 && count(decimals, "mo") == 2)
         print("math_numeric_operators_matrix_columns_cases_rows_and_decimals=passed")
-        let formulas = [#"\text{中文条件}"#, #"x_i^2"#, #"\frac{-b\pm\sqrt{b^2-4ac}}{2a}"#,
+        let formulas = [gauss, #"\oiint_S"#, #"\text{中文条件}"#, #"x_i^2"#, #"\frac{-b\pm\sqrt{b^2-4ac}}{2a}"#,
                         #"\begin{pmatrix}1&2\\3&4\end{pmatrix}"#,
                         #"\begin{cases}x^2&\text{若 }x>0\\ 0&\text{否则}\end{cases}"#,
                         #"\begin{aligned}a&=b&c&=d\\e&=f&g&=h\end{aligned}"#]
@@ -257,6 +390,7 @@ import MathJaxSwift
         try SessionCheck.run()
         MathMarkupCheck.run()
         try FeatureRenderCheck.run()
+        FormulaSchedulingCheck.run()
         var finished = false
         var exportError: Error?
         Task { @MainActor in

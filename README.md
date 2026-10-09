@@ -34,6 +34,7 @@ This is a reader I made for my own daily use, with features and typography chose
 
 ## What it does
 
+- Create a file with a custom extension, such as `.md`, `.py`, or `.txt`, and start editing immediately. Non-Markdown files are displayed as plain text.
 - Read multiple Markdown files in one window, including files opened from Finder, dropped into the window, or reached through local document links.
 - Switch between reading and a two-pane editor. Drag the divider to resize both panes; scroll positions follow corresponding content.
 - Read headings, lists, tables, code, and local images with search and a heading outline.
@@ -48,10 +49,11 @@ This is a reader I made for my own daily use, with features and typography chose
 | Action | Shortcut |
 | --- | --- |
 | Open files | ⌘O, or drop files into the window |
+| New file | ⌘N, or the fourth button at the upper right |
 | New tab | ⌘T |
 | Save / Save As | ⌘S / ⇧⌘S |
-| Switch reading and editing modes | ⇧⌘E, or the middle button at the upper right |
-| Show or hide the outline | ⌘2, or the right button at the upper right |
+| Switch reading and editing modes | ⇧⌘E, or the second button at the upper right |
+| Show or hide the outline | ⌘2, or the third button at the upper right |
 | Find | ⌘F |
 | Export PDF | ⌥⌘E, or the left button at the upper right |
 | Change text size | ⌘+ / ⌘− / ⌘0 |

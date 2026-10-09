@@ -431,9 +431,14 @@ final class ReaderState: ObservableObject {
                       userInfo: [NSLocalizedDescriptionKey: "无法识别文件编码"])
     }
 
+    private static func usesPlainText(_ url: URL?) -> Bool {
+        guard let url else { return false }
+        return !["md", "markdown", "mdown", "mkd", "mkdn"].contains(url.pathExtension.lowercased())
+    }
+
     private static func makeTab(id: UUID = UUID(), url: URL, text: String,
                                 encoding: String, stamp: FileStamp?, data: Data) -> ReaderTab {
-        if url.pathExtension.lowercased() == "txt" {
+        if Self.usesPlainText(url) {
             let normalized = text.replacingOccurrences(of: "\r\n", with: "\n")
                 .replacingOccurrences(of: "\r", with: "\n")
             let lines = normalized.components(separatedBy: "\n")
@@ -455,7 +460,7 @@ final class ReaderState: ObservableObject {
     }
 
     private static func parseDraft(_ tab: inout ReaderTab) {
-        if tab.url?.pathExtension.lowercased() == "txt" {
+        if Self.usesPlainText(tab.url) {
             tab.mathTokens = [:]
             let lines = tab.source.replacingOccurrences(of: "\r\n", with: "\n")
                 .replacingOccurrences(of: "\r", with: "\n")
@@ -567,7 +572,7 @@ final class ReaderState: ObservableObject {
         guard let index = tabs.firstIndex(where: { $0.id == tabID }),
               tabs[index].editRevision == revision else { return }
         let source = tabs[index].source
-        if tabs[index].url?.pathExtension.lowercased() == "txt" {
+        if Self.usesPlainText(tabs[index].url) {
             tabs[index].mathTokens = [:]
             let normalized = source.replacingOccurrences(of: "\r\n", with: "\n")
                 .replacingOccurrences(of: "\r", with: "\n")
@@ -718,6 +723,35 @@ final class ReaderState: ObservableObject {
         }
     }
 
+    func chooseNewFile() {
+        let panel = NSSavePanel()
+        panel.title = "新建文件"
+        panel.prompt = "创建"
+        panel.message = "输入完整文件名，例如 笔记.md、hello.py 或 notes.txt。"
+        panel.nameFieldLabel = "文件名："
+        panel.nameFieldStringValue = "未命名.md"
+        panel.isExtensionHidden = false
+        panel.canCreateDirectories = true
+        // No content-type filter: preserve the exact extension supplied by the user.
+        panel.directoryURL = currentTab?.url?.deletingLastPathComponent()
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        createFile(at: url)
+    }
+
+    @discardableResult
+    func createFile(at url: URL) -> Bool {
+        do {
+            // Creation must never truncate an existing file, including a race with another app.
+            try Data().write(to: url, options: .withoutOverwriting)
+            guard open(url) != nil else { return false }
+            if !isEditing { toggleMode() }
+            return true
+        } catch {
+            self.error = "无法新建文件：\(url.path)\n\(error.localizedDescription)\n如果文件已存在，请使用其他文件名。"
+            return false
+        }
+    }
+
     func newTab() {
         let tab = ReaderTab()
         tabs.append(tab)
@@ -772,10 +806,6 @@ final class ReaderState: ObservableObject {
 
     @discardableResult
     func open(_ newURL: URL) -> UUID? {
-        guard ["md", "markdown", "mdown", "txt"].contains(newURL.pathExtension.lowercased()) else {
-            error = "请选择 Markdown 或纯文本文件。"
-            return nil
-        }
         let scoped = newURL.startAccessingSecurityScopedResource()
         defer { if scoped { newURL.stopAccessingSecurityScopedResource() } }
         do {
@@ -925,6 +955,9 @@ private struct PreviewDocumentContent: View, Equatable {
     let document: Document?
     let fontSize: CGFloat
     let activeSearchPath: String?
+    let mathTokens: [MathToken]
+    @EnvironmentObject private var formulaCache: FormulaCache
+    @Environment(\.displayScale) private var displayScale
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.tabID == rhs.tabID && lhs.previewID == rhs.previewID
@@ -950,6 +983,9 @@ private struct PreviewDocumentContent: View, Equatable {
                         .id("document:\(index)")
                 }
             }
+        }
+        .task(id: "\(previewID):\(fontSize):\(displayScale)") {
+            formulaCache.prefetch(mathTokens, fontSize: fontSize, displayScale: displayScale)
         }
     }
 }
@@ -1316,7 +1352,8 @@ struct ReaderView: View {
                                                        lines: state.currentLines,
                                                        document: state.currentDocument,
                                                        fontSize: state.fontSize,
-                                                       activeSearchPath: state.activeSearchPath)
+                                                       activeSearchPath: state.activeSearchPath,
+                                                       mathTokens: state.currentMathTokens.values.sorted { $0.firstLine < $1.firstLine })
                                 .equatable()
                                 .background(ScrollResolver {
                                     scrollKeeper.scrollView = $0
@@ -1379,7 +1416,8 @@ struct ReaderView: View {
                                  isExporting: state.isExportingPDF,
                                  onMode: { state.toggleMode() },
                                  onOutline: { state.showsOutline.toggle() },
-                                 onExport: { state.exportPDF() })
+                                 onExport: { state.exportPDF() },
+                                 onNewFile: { state.chooseNewFile() })
             .frame(width: 0, height: 0))
         .environmentObject(state)
         .environmentObject(state.formulas)
@@ -1496,6 +1534,7 @@ struct ReaderView: View {
 struct MarkdownBlockView: View {
     @EnvironmentObject private var reader: ReaderState
     @EnvironmentObject private var formulaCache: FormulaCache
+    @StateObject private var formulaUpdates = FormulaUpdates()
     @Environment(\.displayScale) private var displayScale
     let block: Markup
     let fontSize: CGFloat
@@ -1547,6 +1586,15 @@ struct MarkdownBlockView: View {
         return node.children.map { alternativeText($0) }.joined()
     }
 
+    private func paragraphFormulaTokens(_ paragraph: Paragraph) -> [MathToken] {
+        let content = paragraph.format()
+        guard let regex = try? NSRegularExpression(pattern: "\\uE000LM[0-9]+\\uE001") else { return [] }
+        return regex.matches(in: content, range: NSRange(content.startIndex..., in: content)).compactMap {
+            guard let range = Range($0.range, in: content) else { return nil }
+            return reader.currentMathTokens[String(content[range])]
+        }
+    }
+
     private func formulaText(_ content: String, size: CGFloat,
                              strong: Bool, emphasized: Bool, heading: Bool) -> SwiftUI.Text {
         guard content.contains("\u{E000}") else {
@@ -1560,7 +1608,7 @@ struct MarkdownBlockView: View {
                                         strong: strong, emphasized: emphasized, heading: heading)
             let marker = String(remaining[range])
             if let token = reader.currentMathTokens[marker] {
-                switch formulaCache.result(for: token, fontSize: size, displayScale: displayScale) {
+                switch formulaCache.result(for: token, fontSize: size, displayScale: displayScale, observer: formulaUpdates) {
                 case .image(let rendered):
                     result = result + SwiftUI.Text(SwiftUI.Image(nsImage: rendered.image).renderingMode(.template))
                         .baselineOffset(rendered.baselineOffset)
@@ -1581,7 +1629,7 @@ struct MarkdownBlockView: View {
     }
 
     @ViewBuilder private func displayedFormula(_ token: MathToken) -> some View {
-        switch formulaCache.result(for: token, fontSize: fontSize * 1.12, displayScale: displayScale) {
+        switch formulaCache.result(for: token, fontSize: fontSize * 1.12, displayScale: displayScale, observer: formulaUpdates) {
         case .image(let rendered):
             GeometryReader { geometry in
                 ScrollView(.horizontal) {
@@ -1734,12 +1782,7 @@ struct MarkdownBlockView: View {
                     inline(paragraph)
                         .lineSpacing(2)
                         .contextMenu {
-                            ForEach(Array(reader.currentMathTokens.values.filter {
-                                paragraph.format().contains($0.marker)
-                            }.sorted {
-                                let content = paragraph.format()
-                                return content.range(of: $0.marker)!.lowerBound < content.range(of: $1.marker)!.lowerBound
-                            }.enumerated()), id: \.offset) { index, token in
+                            ForEach(Array(paragraphFormulaTokens(paragraph).enumerated()), id: \.offset) { index, token in
                                 Button("复制公式源码 \(index + 1)") {
                                     NSPasteboard.general.clearContents()
                                     NSPasteboard.general.setString(token.original, forType: .string)
@@ -1955,6 +1998,8 @@ struct LightMDApp: App {
             .windowToolbarStyle(.unifiedCompact)
             .commands {
                 CommandGroup(replacing: .newItem) {
+                    Button("新建文件…") { reader.chooseNewFile() }
+                        .keyboardShortcut("n", modifiers: .command)
                     Button("新建标签页") { reader.newTab() }
                         .keyboardShortcut("t", modifiers: .command)
                     Button("打开…") { reader.chooseFile() }

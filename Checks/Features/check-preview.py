@@ -44,10 +44,15 @@ c = js.index('    function escapeHTML'); d = js.index('    async function decode
 assertions = r'''
 const assert = require('node:assert/strict');
 const html = render(featureSource.replaceAll('\\`','`'));
-assert.equal((html.match(/class="formula /g)||[]).length,5);
+assert.equal((html.match(/class="formula /g)||[]).length,10);
 assert.equal((html.match(/class="mermaid-block"/g)||[]).length,1);
 assert.equal((html.match(/class="local-image"/g)||[]).length,1);
 assert.equal((html.match(/<h3 /g)||[]).length,12);
+assert(html.includes('∯') && html.includes('<menclose notation="box">'));
+assert.equal((render(longDocumentSource).match(/class="formula /g)||[]).length,550);
+const cachedCount = formulaHTMLCache.size;
+render(longDocumentSource);
+assert.equal(formulaHTMLCache.size, cachedCount);
 assert(html.includes('A[开始]') && html.includes('data-source-end='));
 assert(inline('`$x_i^2$`').includes('<code>$x_i^2$</code>'));
 assert(!render('```js\n$x_i^2$\n```').includes('class="formula'));

@@ -18,6 +18,7 @@ private struct ChromeCapsuleControls: View {
     let onMode: () -> Void
     let onOutline: () -> Void
     let onExport: () -> Void
+    let onNewFile: () -> Void
 
     var body: some View {
         HStack(spacing: 0) {
@@ -47,6 +48,14 @@ private struct ChromeCapsuleControls: View {
             }
             .help(showsOutline ? "隐藏右侧目录" : "显示右侧目录")
             .accessibilityLabel(showsOutline ? "隐藏右侧目录" : "显示右侧目录")
+
+            Button(action: onNewFile) {
+                Image(systemName: "doc.badge.plus")
+                    .font(.system(size: 16, weight: .regular))
+                    .foregroundStyle(.primary)
+            }
+            .help("新建文件… (⌘N)")
+            .accessibilityLabel("新建文件")
         }
         .buttonStyle(CapsuleButtonStyle())
         .background(Color(nsColor: .windowBackgroundColor), in: Capsule())
@@ -63,6 +72,7 @@ private final class WindowChromeView: NSView {
     var onMode: (() -> Void)?
     var onOutline: (() -> Void)?
     var onExport: (() -> Void)?
+    var onNewFile: (() -> Void)?
 
     private weak var installedWindow: NSWindow?
     private var accessory: NSTitlebarAccessoryViewController?
@@ -102,9 +112,9 @@ private final class WindowChromeView: NSView {
 
     private func install(in window: NSWindow) {
         installedWindow = window
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 112, height: 28))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 146, height: 28))
         let hosting = NSHostingView(rootView: makeControls())
-        hosting.frame = NSRect(x: 4, y: 1, width: 102, height: 26)
+        hosting.frame = NSRect(x: 4, y: 1, width: 136, height: 26)
         container.addSubview(hosting)
         controls = hosting
 
@@ -147,7 +157,8 @@ private final class WindowChromeView: NSView {
         ChromeCapsuleControls(isEditing: isEditing, showsOutline: showsOutline, isExporting: isExporting,
                               onMode: { [weak self] in self?.onMode?() },
                               onOutline: { [weak self] in self?.onOutline?() },
-                              onExport: { [weak self] in self?.onExport?() })
+                              onExport: { [weak self] in self?.onExport?() },
+                              onNewFile: { [weak self] in self?.onNewFile?() })
     }
 
     func detach() {
@@ -171,6 +182,7 @@ struct WindowChrome: NSViewRepresentable {
     let onMode: () -> Void
     let onOutline: () -> Void
     let onExport: () -> Void
+    let onNewFile: () -> Void
 
     func makeNSView(context: Context) -> NSView {
         let view = WindowChromeView()
@@ -195,6 +207,7 @@ struct WindowChrome: NSViewRepresentable {
         view.onMode = onMode
         view.onOutline = onOutline
         view.onExport = onExport
+        view.onNewFile = onNewFile
         view.refresh()
     }
 }

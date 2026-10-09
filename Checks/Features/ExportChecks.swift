@@ -49,7 +49,8 @@ import SwiftUI
         let before = try Data(contentsOf: named)
         let segment = (0..<650).map { "SEG\(String(format: "%04d", $0)) 中文跨页正文。" }.joined(separator: " ")
         let table = "| A | B | C |\n| --- | --- | --- |\n" + (0..<65).map { "| ROW\(String(format: "%03d", $0)) | 中文单元格 | 内容 |\n" }.joined()
-        let source = "# 中文 PDF 导出\n\n最新未保存内容 SNAPSHOT_SENTINEL。\n\n[链接](https://example.com/)\n\n\(segment)\n\n\(table)\n\n" +
+        let gauss = #"\boxed{\oiint_S\mathbf D\cdot d\mathbf S=Q_{\text{inside}}}"#
+        let source = "$$" + gauss + "$$\n\n" + "# 中文 PDF 导出\n\n最新未保存内容 SNAPSHOT_SENTINEL。\n\n[链接](https://example.com/)\n\n\(segment)\n\n\(table)\n\n" +
             "```swift\nlet text = \"<script>not executable</script>\"\n```\n\n" +
             "$$\\begin{pmatrix}1&2\\\\3&4\\end{pmatrix}$$\n\n![图](%E5%9B%BE%20%E7%89%87.svg)\n\n```mermaid\n\(graph)\n```\n\nTAIL_SENTINEL 最后一段。\n"
         let state = ReaderState(sessionStore: SessionStore(url: root.appendingPathComponent("session.json")))
@@ -61,6 +62,14 @@ import SwiftUI
         let htmlRenderer = PDFHTMLRenderer(snapshot: snapshot)
         let html = try await htmlRenderer.document()
         precondition(htmlRenderer.warnings.isEmpty)
+        let svgPattern = try NSRegularExpression(pattern: #"data:image/svg\+xml;base64,([A-Za-z0-9+/=]+)"#)
+        let embeddedSVGs = svgPattern.matches(in: html, range: NSRange(html.startIndex..., in: html)).compactMap { match -> String? in
+            guard let range = Range(match.range(at: 1), in: html),
+                  let data = Data(base64Encoded: String(html[range])) else { return nil }
+            return String(data: data, encoding: .utf8)
+        }
+        precondition(embeddedSVGs.contains { $0.contains("∯") && $0.contains("menclose") && !$0.contains("merror") })
+        print("gauss_formula_in_exported_svg_without_fallback=passed")
         precondition(html.contains("class=mermaid") && html.contains("class=math") && html.contains("class=local-image"))
         precondition(!html.contains("<script>not executable</script>"))
         let target = root.appendingPathComponent("document.pdf")

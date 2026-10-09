@@ -17,7 +17,7 @@
     .mac-titlebar i:nth-child(1) { background: #ff5f57; }
     .mac-titlebar i:nth-child(2) { background: #febc2e; }
     .mac-titlebar i:nth-child(3) { background: #28c840; }
-    .capsule-controls { position: absolute; right: 14px; top: 8px; width: 104px; height: 26px; display: flex; align-items: stretch; overflow: hidden; border: 1px solid color-mix(in srgb, CanvasText 18%, Canvas); border-radius: 999px; background: Canvas; }
+    .capsule-controls { position: absolute; right: 14px; top: 8px; width: 138px; height: 26px; display: flex; align-items: stretch; overflow: hidden; border: 1px solid color-mix(in srgb, CanvasText 18%, Canvas); border-radius: 999px; background: Canvas; }
     .titlebar-toggle { width: 34px; height: 24px; border: 0; background: transparent; color: CanvasText; display: flex; align-items: center; justify-content: center; padding: 0; transition: background .14s ease, transform .14s ease; }
     .titlebar-toggle:hover { background: color-mix(in srgb, CanvasText 6%, Canvas); }
     .titlebar-toggle:active { background: color-mix(in srgb, CanvasText 12%, Canvas); transform: scale(.92); }
@@ -123,7 +123,7 @@
 </head>
 <body>
   <div class="menu-bar" aria-label="中文菜单示意"><strong>LightMD</strong><span>文件</span><span>编辑</span><span>显示</span><span>窗口</span><span>帮助</span><small>交互预览 · 刷新可恢复标签与草稿；不会写回磁盘文件</small></div>
-  <div class="mac-titlebar"><i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i><div class="capsule-controls"><button id="exportPDF" class="titlebar-toggle" title="导出 PDF（预览中使用浏览器打印）" aria-label="导出 PDF"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 7H3v11h14V7h-3M10 12V1M6 5l4-4 4 4"/></svg></button><button id="toggleMode" class="titlebar-toggle mode-toggle" title="切换到双栏编辑模式" aria-label="切换到双栏编辑模式"><svg class="split-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="2" y="2" width="16" height="16" rx="2"/><path d="M8 2v16"/></svg><svg class="book-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4c-2-1.5-5-1.5-8-1v13c3-.5 6-.5 8 1 2-1.5 5-1.5 8-1V3c-3-.5-6-.5-8 1Z"/><path d="M10 4v13"/></svg></button><button id="toggleOutline" class="titlebar-toggle" title="显示或隐藏右侧目录" aria-label="显示或隐藏右侧目录" aria-expanded="false"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2" y="2" width="16" height="16" rx="2"/><path d="M13 2v16"/></svg></button></div><span id="titleName" class="titlebar-name">阅读示例.md</span></div>
+  <div class="mac-titlebar"><i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i><div class="capsule-controls"><button id="exportPDF" class="titlebar-toggle" title="导出 PDF（预览中使用浏览器打印）" aria-label="导出 PDF"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 7H3v11h14V7h-3M10 12V1M6 5l4-4 4 4"/></svg></button><button id="toggleMode" class="titlebar-toggle mode-toggle" title="切换到双栏编辑模式" aria-label="切换到双栏编辑模式"><svg class="split-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="2" y="2" width="16" height="16" rx="2"/><path d="M8 2v16"/></svg><svg class="book-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4c-2-1.5-5-1.5-8-1v13c3-.5 6-.5 8 1 2-1.5 5-1.5 8-1V3c-3-.5-6-.5-8 1Z"/><path d="M10 4v13"/></svg></button><button id="toggleOutline" class="titlebar-toggle" title="显示或隐藏右侧目录" aria-label="显示或隐藏右侧目录" aria-expanded="false"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2" y="2" width="16" height="16" rx="2"/><path d="M13 2v16"/></svg></button><button id="newFile" class="titlebar-toggle" title="新建文件… (⌘N)" aria-label="新建文件"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M11 18H3V2h8l5 5v3M11 2v5h5M15 12v7M11.5 15.5h7"/></svg></button></div><span id="titleName" class="titlebar-name">阅读示例.md</span></div>
   <input id="file" type="file" accept=".md,.markdown,.mdown,.txt" multiple hidden>
   <nav class="tabs" id="tabs" aria-label="文档标签页"></nav>
   <div class="file-path" id="filePath">/Users/example/Documents/LightMD/阅读示例.md</div>
@@ -163,6 +163,11 @@
     let visualInset = 0;
     let outlineFrame;
     const formulaExamples = new Map([
+      ['\\mathbf E', '<mi mathvariant="bold">E</mi>'],
+      ['\\mathbf D', '<mi mathvariant="bold">D</mi>'],
+      ['V', '<mi>V</mi>'],
+      ['\\mathbf D=\\varepsilon\\mathbf E', '<mi mathvariant="bold">D</mi><mo>=</mo><mi>ε</mi><mi mathvariant="bold">E</mi>'],
+      ['\\boxed{\\oiint_S\\mathbf D\\cdot d\\mathbf S=Q_{\\text{inside}}}', '<menclose notation="box"><mrow><msub><mo largeop="true" movablelimits="false">∯</mo><mi>S</mi></msub><mi mathvariant="bold">D</mi><mo>⋅</mo><mi>d</mi><mi mathvariant="bold">S</mi><mo>=</mo><msub><mi>Q</mi><mtext>inside</mtext></msub></mrow></menclose>'],
       ['x_i^2', '<msubsup><mi>x</mi><mi>i</mi><mn>2</mn></msubsup>'],
       ['E=mc^2', '<mi>E</mi><mo>=</mo><mi>m</mi><msup><mi>c</mi><mn>2</mn></msup>'],
       ['\\frac{-b\\pm\\sqrt{b^2-4ac}}{2a}', '<mfrac><mrow><mo>−</mo><mi>b</mi><mo>±</mo><msqrt><msup><mi>b</mi><mn>2</mn></msup><mo>−</mo><mn>4</mn><mi>a</mi><mi>c</mi></msqrt></mrow><mrow><mn>2</mn><mi>a</mi></mrow></mfrac>'],
@@ -185,6 +190,22 @@ $$
 \]
 
 $$\begin{cases}x^2&\text{若 }x>0\\ 0&\text{否则}\end{cases}$$
+
+| 研究角度 | 核心量 | 主要问题 |
+|---|---|---|
+| 受力 | \(\mathbf E\) | 放入电荷会受多大力？ |
+| 通量 | \(\mathbf D\) | 穿出封闭面的净通量是多少？ |
+| 能量 | \(V\) | 移动电荷需要做多少功？ |
+
+引入电通量密度（electric flux density）：
+\[
+\mathbf D=\varepsilon\mathbf E
+\]
+
+再用高斯定律（Gauss’s law）联系场与电荷：
+\[
+\boxed{\oiint_S\mathbf D\cdot d\mathbf S=Q_{\text{inside}}}
+\]
 
 右键公式可以复制源码；无法识别的公式保留原文，例如 $\unknowncommand$。浏览器预览演示这些固定公式；原生应用支持编辑任意受支持的 LaTeX 公式。
 
@@ -221,10 +242,20 @@ flowchart LR
 
 ` + Array.from({length: 12}, (_, i) => `### 示例段落 ${i + 1}\n\n这段用于检查刷新后的阅读位置。页面变窄时正文实时换行，滚动恢复按内容块定位。\n\n`).join('').replaceAll('\\n', '\n');
     const initialSource = ["# LightMD 阅读示例", "", "这是一份用于查看 Markdown 排版与编辑效果的示例文档。", "", "## 阅读与编辑", "", "正文支持 **粗体**、*斜体*、English 和 12345。", "", "1. 打开文档，查看排版。", "2. 切换编辑模式，调整左右宽度。", "", "### 常用功能", "", "| 功能 | 说明 | 操作 |", "| --- | --- | --- |", "| 阅读 | 查看文档 | 打开文件 |", "| 编辑 | 实时预览 | 切换模式 |"].join('\n');
+    // Keep a representative formula-heavy document available for manual review.
+    const longDocumentSource = '# 长文公式阅读\n\n' + Array.from({length: 110}, (_, i) =>
+      `## 第 ${i + 1} 节\n\n复习行内公式 $x_i^2$ 和 $E=mc^2$。\n\n` +
+      '$$\\frac{-b\\pm\\sqrt{b^2-4ac}}{2a}$$\n\n' +
+      '> $$\\begin{pmatrix}1&2\\\\3&4\\end{pmatrix}$$\n\n' +
+      '| 量 | 表达式 |\n| --- | --- |\n| 场 | $\\mathbf E$ |\n\n'
+    ).join('');
+    const formulaHTMLCache = new Map();
     let tabs = [{ name: '阅读示例.md', path: '/Users/example/Documents/LightMD/阅读示例.md', source: initialSource,
                   savedSource: initialSource, html: render(initialSource) },
                 { name: '公式与图片.md', path: '/Users/example/Documents/LightMD/公式与图片.md', source: featureSource.replaceAll('\\`', '`'),
-                  savedSource: featureSource.replaceAll('\\`', '`'), html: render(featureSource.replaceAll('\\`', '`')) }];
+                  savedSource: featureSource.replaceAll('\\`', '`'), html: render(featureSource.replaceAll('\\`', '`')) },
+                { name: '长文公式示例.md', path: '', source: longDocumentSource,
+                  savedSource: longDocumentSource, html: render(longDocumentSource) }];
     let active = 1;
     const sessionKey = 'LightMD-preview-session-v017';
     let sessionTimer, switchingPage = false;
@@ -254,7 +285,7 @@ flowchart LR
       try {
         const stored = JSON.parse(localStorage.getItem(sessionKey));
         if (!stored?.tabs?.length || !stored.tabs.every(tab => typeof tab.source === 'string' && typeof tab.name === 'string')) return;
-        tabs = stored.tabs.map(tab => ({...tab, html: /\.txt$/i.test(tab.name) ? renderPlain(tab.source) : render(tab.source)}));
+        tabs = stored.tabs.map(tab => ({...tab, html: usesPlainText(tab.name) ? renderPlain(tab.source) : render(tab.source)}));
         active = Math.max(0, Math.min(Number(stored.active) || 0, tabs.length - 1));
       } catch { /* Keep the example when no valid preview session exists. */ }
     }
@@ -336,9 +367,21 @@ flowchart LR
       switchingPage = false;
       scheduleSession();
     }
+    function usesPlainText(name) { return name !== '未命名' && !/\.(md|markdown|mdown|mkd|mkdn)$/i.test(name); }
+    function newFile() {
+      const name = prompt('新建文件（交互预览，不写入磁盘）\n输入完整文件名，如 笔记.md、hello.py：', '未命名.md');
+      if (name === null) return;
+      if (!name.trim() || /[\/\x00]/.test(name) || name === '.' || name === '..') { alert('请输入有效文件名。'); return; }
+      if (tabs.some(tab => tab.name === name)) { alert('文件已存在，请使用其他文件名。'); return; }
+      captureBookmark();
+      tabs.push({name, path: '/预览目录/' + name, source: '', savedSource: '', html: ''});
+      active = tabs.length - 1;
+      drawTabs(); drawPage(); setMode('split'); scheduleSession(); sourceEditor.focus();
+    }
+    document.getElementById('newFile').onclick = newFile;
     function newTab() { captureBookmark(); tabs.push({ name: '未命名', path: '', source: '', savedSource: '', html: '' }); active = tabs.length - 1; drawTabs(); drawPage(); }
     function redrawEditedPreview(tab, exportMode = false) {
-      tab.html = /\.txt$/i.test(tab.name) ? renderPlain(tab.source) : render(tab.source);
+      tab.html = usesPlainText(tab.name) ? renderPlain(tab.source) : render(tab.source);
       if (tabs[active] !== tab) return;
       const oldY = documentScroll.scrollTop;
       page.innerHTML = tab.html || emptyHTML();
@@ -589,6 +632,7 @@ flowchart LR
       if (e.key === 'Escape' && !searchBar.hidden) { hideSearch(); return; }
       if (!(e.metaKey || e.ctrlKey)) return;
       const key = e.key.toLowerCase();
+      if (key === 'n') { e.preventDefault(); newFile(); }
       if (key === 't') { e.preventDefault(); newTab(); }
       if (key === 'o') { e.preventDefault(); fileInput.click(); }
       if (key === 'f') { e.preventDefault(); showSearch(); }
@@ -601,12 +645,16 @@ flowchart LR
     });
     function escapeHTML(s) { return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
     function mathHTML(original) {
+      if (formulaHTMLCache.has(original)) return formulaHTMLCache.get(original);
       const display = original.startsWith('$$') || original.startsWith('\\[');
       const formula = original.startsWith('$$') ? original.slice(2, -2).trim()
         : original.startsWith('$') ? original.slice(1, -1).trim() : original.slice(2, -2).trim();
       const body = formulaExamples.get(formula);
       if (!body) return escapeHTML(original);
-      return `<span class="formula ${display ? 'block' : ''}" data-formula="${escapeHTML(original)}" title="右键复制公式源码"><math xmlns="http://www.w3.org/1998/Math/MathML" display="${display ? 'block' : 'inline'}" aria-label="${escapeHTML(formula)}">${body}</math></span>`;
+      const html = `<span class="formula ${display ? 'block' : ''}" data-formula="${escapeHTML(original)}" title="右键复制公式源码"><math xmlns="http://www.w3.org/1998/Math/MathML" display="${display ? 'block' : 'inline'}" aria-label="${escapeHTML(formula)}">${body}</math></span>`;
+      if (formulaHTMLCache.size >= 2048) formulaHTMLCache.delete(formulaHTMLCache.keys().next().value);
+      formulaHTMLCache.set(original, html);
+      return html;
     }
     function inline(s) {
       const tokens = [];
@@ -716,7 +764,7 @@ flowchart LR
       try {
         const content = await decodeFile(file);
         const tab = { name: file.name, path: file.webkitRelativePath || file.name, source: content, savedSource: content,
-                      fileKey: key, html: /\.txt$/i.test(file.name) ? renderPlain(content) : render(content) };
+                      fileKey: key, html: usesPlainText(file.name) ? renderPlain(content) : render(content) };
         if (tabs[active].name === '未命名' && tabs[active].source === '') tabs[active] = tab;
         else { tabs.push(tab); active = tabs.length - 1; }
         drawTabs(); drawPage();

@@ -9,8 +9,8 @@
   <key>CFBundleIconFile</key><string>LightMDIcon.icns</string>
   <key>CFBundleExecutable</key><string>LightMD</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.17.1</string>
-  <key>CFBundleVersion</key><string>34</string>
+  <key>CFBundleShortVersionString</key><string>0.18.3</string>
+  <key>CFBundleVersion</key><string>38</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>CFBundleDocumentTypes</key><array><dict>
     <key>CFBundleTypeName</key><string>Markdown</string>
