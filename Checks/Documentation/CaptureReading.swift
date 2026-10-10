@@ -96,8 +96,8 @@ private final class ActiveWindowButtons: NSView {
             showsOutline: false, isExporting: false,
             onMode: {}, onOutline: {}, onExport: {}, onNewFile: {}))
         let titleY = window.standardWindowButton(.closeButton)?.frame.midY ?? (view.bounds.height - 16)
-        controls.frame = NSRect(x: view.bounds.width - 144, y: titleY - 13,
-                                width: 136, height: 26)
+        controls.frame = NSRect(x: view.bounds.width - 178, y: titleY - 13,
+                                width: 170, height: 26)
         view.addSubview(controls, positioned: .above, relativeTo: nil)
         controls.layoutSubtreeIfNeeded()
         // Hidden windows receive inactive gray system button colors. Render the

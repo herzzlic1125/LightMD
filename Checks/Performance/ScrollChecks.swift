@@ -17,6 +17,11 @@ import SwiftUI
             + view.subviews.flatMap { scrollViews($0) }
     }
 
+    static func outlineHandle(_ view: NSView) -> NSView? {
+        if view.identifier?.rawValue == "outlineResizeHandle" { return view }
+        return view.subviews.lazy.compactMap { outlineHandle($0) }.first
+    }
+
     static func main() throws {
         setbuf(stdout, nil)
         _ = NSApplication.shared
@@ -68,6 +73,38 @@ import SwiftUI
         }
         print("retained_tokens images=\(images) failures=\(failures) pending=\(pending)")
         precondition(pending == 0, "Prefetched document did not stay cached")
+        state.showsOutline = true
+        pump(0.4)
+        for fraction in [0.0, 0.5, 1.0] {
+            let maximum = max(0, (scroll.documentView?.frame.height ?? 0) - scroll.contentView.bounds.height)
+            scroll.contentView.scroll(to: CGPoint(x: 0, y: maximum * fraction))
+            host.layoutSubtreeIfNeeded(); pump(0.1)
+            let grip = outlineHandle(host)!
+            let start = grip.convert(CGPoint(x: grip.bounds.midX, y: grip.bounds.midY), to: nil)
+            func event(_ type: NSEvent.EventType, _ point: CGPoint) -> NSEvent {
+                NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                                   timestamp: ProcessInfo.processInfo.systemUptime,
+                                   windowNumber: window.windowNumber, context: nil,
+                                   eventNumber: 1, clickCount: 1, pressure: 1)!
+            }
+            grip.mouseDown(with: event(.leftMouseDown, start))
+            let dragStart = CFAbsoluteTimeGetCurrent()
+            for step in 0..<30 {
+                let delta = CGFloat(step < 15 ? step : 29 - step) * -12
+                grip.mouseDragged(with: event(.leftMouseDragged, CGPoint(x: start.x + delta, y: start.y)))
+                host.layoutSubtreeIfNeeded(); pump(1.0 / 60)
+            }
+            grip.mouseUp(with: event(.leftMouseUp, start))
+            print(String(format: "outline_drag_at=%.1f avg_ms=%.2f", fraction,
+                         (CFAbsoluteTimeGetCurrent() - dragStart) * 1000 / 30))
+            for step in 0..<10 {
+                let maximum = max(0, (scroll.documentView?.frame.height ?? 0) - scroll.contentView.bounds.height)
+                scroll.contentView.scroll(to: CGPoint(x: 0, y: min(maximum, max(0,
+                    scroll.contentView.bounds.minY + (step < 5 ? -60 : 60)))))
+                NotificationCenter.default.post(name: NSScrollView.didLiveScrollNotification, object: scroll)
+                host.layoutSubtreeIfNeeded(); pump(1.0 / 60)
+            }
+        }
         state.isEditing = true
         pump(0.6)
         for fraction in [0.0, 0.5, 1.0] {

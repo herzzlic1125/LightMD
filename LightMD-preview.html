@@ -48,16 +48,21 @@
     .split-divider { position: absolute; z-index: 3; top: 0; bottom: 0; left: -14px; width: 14px; opacity: 0; transition: left .28s ease-in-out, opacity .28s ease-in-out; cursor: col-resize; touch-action: none; pointer-events: none; }
     .split-divider::before { content: ''; position: absolute; inset: 0 auto 0 6.5px; width: 1px; background: color-mix(in srgb, CanvasText 20%, Canvas); }
     .reading-area.editing .split-divider { left: var(--split-left, 40%); opacity: 1; pointer-events: auto; }
-    .reading-area.transitioning .source-pane, .reading-area.transitioning .split-divider { pointer-events: none; }
+    .reading-area.transitioning .source-pane, .reading-area.transitioning .split-divider, .reading-area.transitioning .outline-resize { pointer-events: none; }
     .reading-area.dragging .document-scroll, .reading-area.dragging .split-divider { transition: none; }
-    .outline { position: absolute; z-index: 2; right: 0; top: 0; width: 221px; height: 100%; background: Canvas; }
+    .outline { position: absolute; z-index: 2; right: 0; top: 0; width: var(--outline-width, 221px); height: 100%; background: Canvas; }
     .reading-area.collapsed .outline { pointer-events: none; }
-    .outline-inner { width: 221px; height: 100%; border-left: 1px solid color-mix(in srgb, CanvasText 14%, Canvas); display: flex; flex-direction: column; }
+    .outline-inner { width: calc(100% - 8px); margin-left: 8px; height: 100%; display: flex; flex-direction: column; }
+    .outline-resize { position: absolute; inset: 0 auto 0 0; width: 8px; cursor: col-resize; touch-action: none; }
+    .outline-resize::before { content: ''; position: absolute; inset: 0 auto 0 3.5px; width: 1px; background: color-mix(in srgb, CanvasText 20%, Canvas); }
+    .outline-resize:focus-visible { outline: 2px solid Highlight; outline-offset: -2px; }
+    .reading-area.outline-dragging { cursor: col-resize; user-select: none; }
+    .reading-area.outline-dragging .page { transition: none; }
     .outline-title { padding: 12px 14px; border-bottom: 1px solid color-mix(in srgb, CanvasText 14%, Canvas); font-size: 13px; font-weight: 600; }
     .outline-list { overflow-y: auto; padding: 6px 10px; }
     .outline-list button { display: block; width: 100%; padding: 7px 4px; text-align: left; border: 0; background: transparent; font-size: 12px; }
     .outline-list button:hover { background: color-mix(in srgb, CanvasText 7%, Canvas); }
-    .document-scroll { position: absolute; inset: 0 auto 0 0; width: var(--preview-width, 100%); left: var(--preview-left, 0%); overflow-y: auto; overflow-x: hidden; }
+    .document-scroll { position: absolute; inset: 0 auto 0 0; width: var(--preview-width, 100%); left: var(--preview-left, 0%); overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; }
     .page { width: 760px; margin: 0; padding: 18px 0; transform: translateX(0); font: 16px/1.55 "Songti SC", serif; }
     .page.blank { height: 100%; }
     .page > * { margin: 0 0 14px; }
@@ -85,6 +90,16 @@
     .page th { background: color-mix(in srgb, CanvasText 5%, Canvas); }
     .page .plain-line { white-space: pre-wrap; overflow-wrap: anywhere; }
     .page .search-hit { background: #ffd94d44; }
+    #toggleLive[aria-pressed="true"] { color: #287bcc; background: #287bcc18; }
+    .page.live-mode > [data-source-line], .page.live-mode > ul, .page.live-mode > ol, .page.live-mode > table { cursor: text; }
+    .live-editor { padding: 8px; border-radius: 7px; background: #287bcc09; margin: 0 0 14px; }
+    .live-editor-header { display: flex; justify-content: space-between; color: #888; font: 11px -apple-system, sans-serif; margin-bottom: 8px; }
+    .live-editor-header button { border: 0; background: transparent; color: CanvasText; cursor: pointer; }
+    .live-source { display: block; width: 100%; min-height: 48px; max-height: 480px; resize: none; border: 1px solid #287bcc55; border-radius: 5px; outline: none; padding: 12px 16px; background: Canvas; color: CanvasText; font: 14px/1.5 ui-monospace, SFMono-Regular, monospace; overflow: auto; }
+    .live-local-preview { padding-top: 8px; }
+    .live-local-preview > * { margin: 0 0 8px; }
+    .live-append { border: 0; background: transparent; color: #888; font: 13px -apple-system, sans-serif; padding: 12px 0; cursor: text; }
+    @media print { .live-editor-header, .live-source, .live-append { display: none !important; } }
     .formula { font-family: math; color: inherit; cursor: context-menu; }
     .formula.block { display: block; overflow-x: auto; text-align: center; padding: 8px 0; font-size: 1.12em; }
     .formula math { color: inherit; }
@@ -107,7 +122,7 @@
       .menu-bar,.mac-titlebar,.tabs,.file-path,.search-bar,.source-pane,.split-divider,.outline,.source-mirror,.image-dialog,#formulaMenu { display: none !important; }
       .reading-area,.document-scroll { position: static; height: auto; min-height: 0; width: 100%; overflow: visible; }
       .page { width: 100% !important; transform: none !important; margin: 0; padding: 0; }
-      .page p { orphans: 3; widows: 3; }
+      .page p { orphans: 3; widows: 3; break-inside: avoid; page-break-inside: avoid; }
       .page h1,.page h2,.page h3 { break-after: avoid; }
       .page pre { white-space: pre-wrap; overflow-wrap: anywhere; }
       .local-image,.mermaid-block { break-inside: avoid; }
@@ -123,7 +138,7 @@
 </head>
 <body>
   <div class="menu-bar" aria-label="中文菜单示意"><strong>LightMD</strong><span>文件</span><span>编辑</span><span>显示</span><span>窗口</span><span>帮助</span><small>交互预览 · 刷新可恢复标签与草稿；不会写回磁盘文件</small></div>
-  <div class="mac-titlebar"><i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i><div class="capsule-controls"><button id="exportPDF" class="titlebar-toggle" title="导出 PDF（预览中使用浏览器打印）" aria-label="导出 PDF"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 7H3v11h14V7h-3M10 12V1M6 5l4-4 4 4"/></svg></button><button id="toggleMode" class="titlebar-toggle mode-toggle" title="切换到双栏编辑模式" aria-label="切换到双栏编辑模式"><svg class="split-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="2" y="2" width="16" height="16" rx="2"/><path d="M8 2v16"/></svg><svg class="book-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4c-2-1.5-5-1.5-8-1v13c3-.5 6-.5 8 1 2-1.5 5-1.5 8-1V3c-3-.5-6-.5-8 1Z"/><path d="M10 4v13"/></svg></button><button id="toggleOutline" class="titlebar-toggle" title="显示或隐藏右侧目录" aria-label="显示或隐藏右侧目录" aria-expanded="false"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2" y="2" width="16" height="16" rx="2"/><path d="M13 2v16"/></svg></button><button id="newFile" class="titlebar-toggle" title="新建文件… (⌘N)" aria-label="新建文件"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M11 18H3V2h8l5 5v3M11 2v5h5M15 12v7M11.5 15.5h7"/></svg></button></div><span id="titleName" class="titlebar-name">阅读示例.md</span></div>
+  <div class="mac-titlebar"><i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i><div class="capsule-controls"><button id="exportPDF" class="titlebar-toggle" title="导出 PDF（预览中使用浏览器打印）" aria-label="导出 PDF"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 7H3v11h14V7h-3M10 12V1M6 5l4-4 4 4"/></svg></button><button id="toggleMode" class="titlebar-toggle mode-toggle" title="切换到双栏编辑模式" aria-label="切换到双栏编辑模式"><svg class="split-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="2" y="2" width="16" height="16" rx="2"/><path d="M8 2v16"/></svg><svg class="book-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4c-2-1.5-5-1.5-8-1v13c3-.5 6-.5 8 1 2-1.5 5-1.5 8-1V3c-3-.5-6-.5-8 1Z"/><path d="M10 4v13"/></svg></button><button id="toggleOutline" class="titlebar-toggle" title="显示或隐藏右侧目录" aria-label="显示或隐藏右侧目录" aria-expanded="false"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2" y="2" width="16" height="16" rx="2"/><path d="M13 2v16"/></svg></button><button id="newFile" class="titlebar-toggle" title="新建文件… (⌘N)" aria-label="新建文件"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M11 18H3V2h8l5 5v3M11 2v5h5M15 12v7M11.5 15.5h7"/></svg></button><button id="toggleLive" class="titlebar-toggle" title="切换到即时编辑模式" aria-label="切换到即时编辑模式" aria-pressed="false"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M12 3H3v14h14V8M9 12l1-4 6-6 3 3-6 6-4 1Z"/></svg></button></div><span id="titleName" class="titlebar-name">阅读示例.md</span></div>
   <input id="file" type="file" accept=".md,.markdown,.mdown,.txt" multiple hidden>
   <nav class="tabs" id="tabs" aria-label="文档标签页"></nav>
   <div class="file-path" id="filePath">/Users/example/Documents/LightMD/阅读示例.md</div>
@@ -132,7 +147,7 @@
   <div class="source-pane" id="sourcePane"><textarea id="sourceEditor" spellcheck="false" aria-label="Markdown 源码"></textarea></div>
   <div class="source-mirror" id="sourceMirror" aria-hidden="true"></div>
   <div class="split-divider" id="splitDivider" role="separator" aria-orientation="vertical" aria-label="调整源码和预览宽度"></div>
-  <aside class="outline" id="outline"><div class="outline-inner"><div class="outline-title">目录</div><div class="outline-list" id="outlineList"></div></div></aside>
+  <aside class="outline" id="outline" aria-hidden="true"><div id="outlineResize" class="outline-resize" role="separator" aria-orientation="vertical" aria-label="调整目录宽度" tabindex="-1"></div><div class="outline-inner"><div class="outline-title">目录</div><div class="outline-list" id="outlineList"></div></div></aside>
   <div class="document-scroll" id="documentScroll"><main class="page" id="page"><h1>LightMD 阅读示例</h1><p>打开文档，查看排版，或切换编辑模式。</p></main></div></div>
   <dialog id="imageDialog" class="image-dialog"><button id="closeImage" aria-label="关闭图片预览">关闭 ×</button><img id="enlargedImage" alt="图片预览"></dialog>
   <button id="formulaMenu" hidden>复制公式源码</button>
@@ -150,8 +165,10 @@
     let diagramsReady = Promise.resolve();
     let diagramSequence = 0;
     const toggleMode = document.getElementById('toggleMode');
+    const toggleLive = document.getElementById('toggleLive');
     const toggleOutline = document.getElementById('toggleOutline');
     const outline = document.getElementById('outline');
+    const outlineResize = document.getElementById('outlineResize');
     const sourceEditor = document.getElementById('sourceEditor');
     const sourceMirror = document.getElementById('sourceMirror');
     const splitDivider = document.getElementById('splitDivider');
@@ -159,6 +176,8 @@
     const searchInput = document.getElementById('searchInput');
     const searchCount = document.getElementById('searchCount');
     let font = 16;
+    let outlineWidth = 221;
+    let outlineDrag = null;
     let targetInset = 0;
     let visualInset = 0;
     let outlineFrame;
@@ -262,7 +281,7 @@ flowchart LR
     function captureBookmark() {
       if (switchingPage || !tabs[active]) return;
       const top = documentScroll.scrollTop;
-      const blocks = [...page.querySelectorAll('[data-source-line]')];
+      const blocks = [...page.querySelectorAll('[data-source-line]')].filter(node=>!node.closest('.live-local-preview'));
       const block = blocks.find(node => node.offsetTop + node.offsetHeight >= top) || blocks.at(-1);
       tabs[active].bookmark = block ? { line: block.dataset.sourceLine,
         fraction: (top - block.offsetTop) / Math.max(1, block.offsetHeight),
@@ -292,6 +311,8 @@ flowchart LR
     window.addEventListener('pagehide', saveSession);
     documentScroll.addEventListener('scroll', scheduleSession);
     let mode = 'reading';
+    let liveEdit = null;
+    const documentHistory = new WeakMap();
     let outlineBeforeEditing = false;
     let splitRatio = 0.4;
     let visualModeProgress = 0;
@@ -347,8 +368,9 @@ flowchart LR
       });
     }
     function drawPage() {
+      finishLiveEdit(true, false);
       switchingPage = true;
-      page.innerHTML = tabs[active].html || emptyHTML();
+      page.innerHTML = tabs[active].html || (mode === 'live' ? '' : emptyHTML());
       page.classList.toggle('blank', !tabs[active].html);
       titleName.textContent = tabs[active].name;
       filePath.textContent = tabs[active].path || '';
@@ -364,6 +386,7 @@ flowchart LR
       positionReadingArea(true);
       restoreBookmark();
       page.querySelectorAll('img').forEach(img => img.addEventListener('load', restoreBookmark, {once: true}));
+      installLiveEditing();
       switchingPage = false;
       scheduleSession();
     }
@@ -393,26 +416,49 @@ flowchart LR
       positionReadingArea(true);
       documentScroll.scrollTop = oldY;
     }
-    sourceEditor.addEventListener('input', () => {
+    let sourceComposing = false;
+    function pauseSourceComposition() {
+      sourceComposing = true;
+      clearTimeout(renderTimer);
+      clearTimeout(autoSaveTimers.get(tabs[active]));
+    }
+    function publishSourceInput() {
+      if (sourceComposing) return;
       const tab = tabs[active];
+      if (tab.source === sourceEditor.value) return;
+      rememberDocumentEdit(tab, tab.source, sourceEditor.value);
       tab.source = sourceEditor.value;
       scheduleSession();
       rebuildSourceMirror();
       drawTabs();
       clearTimeout(renderTimer);
-      renderTimer = setTimeout(() => redrawEditedPreview(tab), 180);
+      renderTimer = setTimeout(() => {
+        if (!sourceComposing && tabs.includes(tab)) redrawEditedPreview(tab);
+      }, 180);
       clearTimeout(autoSaveTimers.get(tab));
       if (tab.path) autoSaveTimers.set(tab, setTimeout(() => {
-        if (!tabs.includes(tab)) return;
+        if (sourceComposing || !tabs.includes(tab)) return;
         tab.savedSource = tab.source;
         drawTabs(); scheduleSession();
       }, 1000));
+    }
+    sourceEditor.addEventListener('compositionstart', pauseSourceComposition);
+    sourceEditor.addEventListener('compositionend', () => {
+      sourceComposing = false;
+      publishSourceInput();
+    });
+    sourceEditor.addEventListener('input', event => {
+      if (event.isComposing) { pauseSourceComposition(); return; }
+      publishSourceInput();
     });
     function setMode(next) {
       const previous = mode;
       if (previous === next) return;
       finishSplitResize();
+      finishOutlineResize();
+      finishLiveEdit(true, true);
       mode = next;
+      installLiveEditing();
       cancelAnimationFrame(modeFrame);
       const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
       modeTransitioning = !reduceMotion;
@@ -441,7 +487,8 @@ flowchart LR
       };
       modeFrame = requestAnimationFrame(frame);
     }
-    toggleMode.onclick = () => setMode(mode === 'reading' ? 'split' : 'reading');
+    toggleMode.onclick = () => setMode(mode === 'split' ? 'reading' : 'split');
+    toggleLive.onclick = () => { if (!usesPlainText(tabs[active].name)) setMode(mode === 'live' ? 'reading' : 'live'); };
     function setSplitRatio(value) {
       const width = Math.max(1, readingArea.clientWidth - 14);
       const sourceMinimum = Math.min(280, width * .45);
@@ -601,19 +648,81 @@ flowchart LR
     function setFont(n) { font = Math.max(12, Math.min(32, n)); page.style.fontSize = font + 'px'; }
     function textWidth(inset, width) { return Math.min(760, Math.max(1, width - inset - 60)); }
     function textX(inset, width) { return (width - inset - textWidth(inset, width)) / 2; }
-    function positionReadingArea() {
-      const sourceWidth = splitRatio * Math.max(1, readingArea.clientWidth - 14);
-      const occupied = visualModeProgress * (sourceWidth + 14);
-      readingArea.style.setProperty('--preview-left', `${occupied}px`);
-      readingArea.style.setProperty('--preview-width', `${Math.max(1, readingArea.clientWidth - occupied)}px`);
-      const width = documentScroll.clientWidth;
-      page.style.width = textWidth(visualInset, width) + 'px';
-      page.style.transform = `translateX(${textX(visualInset, width)}px)`;
-      outline.style.transform = `translateX(${221 - visualInset}px)`;
+    function outlineBounds(width) {
+      width = Math.max(1, width);
+      const minimum = Math.min(160, width * .45);
+      return [minimum, Math.min(420, Math.max(minimum, width * .55))];
     }
-    toggleOutline.onclick = () => {
+    function clampOutline(value, width) {
+      const [minimum, maximum] = outlineBounds(width);
+      return Math.min(maximum, Math.max(minimum, value));
+    }
+    function previewRegionWidth() {
+      return Math.max(1, readingArea.clientWidth - visualModeProgress * (splitRatio * Math.max(1, readingArea.clientWidth - 14) + 14));
+    }
+    function positionReadingArea() {
+      const width = previewRegionWidth();
+      const occupied = readingArea.clientWidth - width;
+      const sidebarWidth = clampOutline(outlineWidth, width);
+      const inset = Math.min(1, Math.max(0, visualInset / Math.max(1, outlineWidth))) * sidebarWidth;
+      readingArea.style.setProperty('--preview-left', `${occupied}px`);
+      // The scrollbar belongs to this viewport, to the left of the outline.
+      readingArea.style.setProperty('--preview-width', `${Math.max(1, width - inset)}px`);
+      readingArea.style.setProperty('--outline-width', `${sidebarWidth}px`);
+      page.style.width = textWidth(0, documentScroll.clientWidth) + 'px';
+      page.style.transform = `translateX(${textX(0, documentScroll.clientWidth)}px)`;
+      outline.style.transform = `translateX(${sidebarWidth - inset}px)`;
+      const [minimum, maximum] = outlineBounds(width);
+      outlineResize.setAttribute('aria-valuemin', String(Math.round(minimum)));
+      outlineResize.setAttribute('aria-valuemax', String(Math.round(maximum)));
+      outlineResize.setAttribute('aria-valuenow', String(Math.round(sidebarWidth)));
+      outlineResize.tabIndex = targetInset && !modeTransitioning ? 0 : -1;
+    }
+    function setOutlineWidth(value) {
       cancelAnimationFrame(outlineFrame);
-      targetInset = targetInset ? 0 : 221;
+      outlineWidth = clampOutline(value, previewRegionWidth());
+      targetInset = visualInset = outlineWidth;
+      positionReadingArea();
+    }
+    outlineResize.addEventListener('pointerdown', event => {
+      if (!targetInset || modeTransitioning) return;
+      captureBookmark();
+      outlineDrag = { x: event.clientX, width: outline.getBoundingClientRect().width,
+        pointer: event.pointerId, bookmark: tabs[active].bookmark };
+      outlineResize.setPointerCapture(event.pointerId);
+      readingArea.classList.add('outline-dragging');
+      event.preventDefault();
+    });
+    outlineResize.addEventListener('pointermove', event => {
+      if (!outlineDrag || event.pointerId !== outlineDrag.pointer) return;
+      setOutlineWidth(outlineDrag.width + outlineDrag.x - event.clientX);
+    });
+    function finishOutlineResize() {
+      if (!outlineDrag) return;
+      const drag = outlineDrag;
+      outlineDrag = null;
+      if (outlineResize.hasPointerCapture(drag.pointer)) outlineResize.releasePointerCapture(drag.pointer);
+      readingArea.classList.remove('outline-dragging');
+      if (drag.bookmark) { tabs[active].bookmark = drag.bookmark; restoreBookmark(); }
+      if (mode === 'split') alignScroll(documentScroll, sourceEditor);
+    }
+    for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+      outlineResize.addEventListener(name, finishOutlineResize);
+    }
+    outlineResize.addEventListener('keydown', event => {
+      if (!targetInset || modeTransitioning) return;
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+        event.preventDefault();
+        captureBookmark();
+        setOutlineWidth(outline.getBoundingClientRect().width + (event.key === 'ArrowLeft' ? 16 : -16));
+        restoreBookmark();
+      }
+    });
+    toggleOutline.onclick = () => {
+      finishOutlineResize();
+      cancelAnimationFrame(outlineFrame);
+      targetInset = targetInset ? 0 : outlineWidth;
+      outline.setAttribute('aria-hidden', String(targetInset === 0));
       readingArea.classList.toggle('collapsed', targetInset === 0);
       toggleOutline.setAttribute('aria-expanded', String(targetInset !== 0));
       const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -629,19 +738,151 @@ flowchart LR
     };
     new ResizeObserver(() => setSplitRatio(splitRatio)).observe(readingArea);
     document.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && liveEdit && !liveEdit.composing) { e.preventDefault(); finishLiveEdit(true, true); return; }
+      if (e.key === 'Escape' && outlineDrag) { finishOutlineResize(); return; }
       if (e.key === 'Escape' && !searchBar.hidden) { hideSearch(); return; }
       if (!(e.metaKey || e.ctrlKey)) return;
       const key = e.key.toLowerCase();
+      if (key === 'z' && !e.isComposing && !sourceComposing && !liveEdit?.composing) { e.preventDefault(); undoDocument(e.shiftKey); return; }
+      if (key === 'l' && e.shiftKey) { e.preventDefault(); toggleLive.click(); return; }
       if (key === 'n') { e.preventDefault(); newFile(); }
       if (key === 't') { e.preventDefault(); newTab(); }
       if (key === 'o') { e.preventDefault(); fileInput.click(); }
       if (key === 'f') { e.preventDefault(); showSearch(); }
       if (key === 'e' && e.altKey) { e.preventDefault(); exportButton.click(); }
-      if (key === 'e' && e.shiftKey) { e.preventDefault(); setMode(mode === 'reading' ? 'split' : 'reading'); }
+      if (key === 'e' && e.shiftKey) { e.preventDefault(); setMode(mode === 'split' ? 'reading' : 'split'); }
       if (key === 's') { e.preventDefault(); alert('浏览器预览不会写回文件。请在 LightMD.app 中保存。'); }
       if (key === '+' || key === '=') { e.preventDefault(); setFont(font + 1); }
       if (key === '-') { e.preventDefault(); setFont(font - 1); }
       if (key === '0') { e.preventDefault(); setFont(16); }
+    });
+    function sourceLineRanges(source) {
+      const rows = [];
+      let start = 0;
+      for (const match of source.matchAll(/\r\n|\r|\n/g)) {
+        rows.push({start, end:match.index, next:match.index+match[0].length});
+        start = match.index + match[0].length;
+      }
+      rows.push({start,end:source.length,next:source.length});
+      return rows;
+    }
+    function spliceSource(source, start, end, fragment) {
+      if (start < 0 || end < start || end > source.length) throw Error('Invalid source range');
+      return source.slice(0,start) + fragment + source.slice(end);
+    }
+    function rememberDocumentEdit(tab, before, after) {
+      if (before === after) return;
+      const history = documentHistory.get(tab) || {undo:[],redo:[]};
+      history.undo.push({before,after}); history.redo.length = 0;
+      if (history.undo.length > 300) history.undo.shift();
+      documentHistory.set(tab,history);
+    }
+    function undoDocument(redo) {
+      const tab=tabs[active], history=documentHistory.get(tab);
+      if (!history) return;
+      const from=redo?history.redo:history.undo, to=redo?history.undo:history.redo;
+      const edit=from.pop(); if (!edit) return;
+      finishLiveEdit(false,false);
+      tab.source=redo?edit.after:edit.before;
+      to.push(edit);
+      tab.html=usesPlainText(tab.name)?renderPlain(tab.source):render(tab.source);
+      drawTabs(); drawPage(); scheduleSession();
+    }
+    function installLiveEditing() {
+      page.querySelectorAll('.live-append').forEach(node=>node.remove());
+      const enabled=mode==='live' && !usesPlainText(tabs[active].name);
+      page.classList.toggle('live-mode',enabled);
+      toggleLive.disabled=usesPlainText(tabs[active].name);
+      toggleLive.setAttribute('aria-pressed',String(enabled));
+      toggleLive.title=enabled?'退出即时编辑模式':'切换到即时编辑模式';
+      toggleLive.setAttribute('aria-label',toggleLive.title);
+      if (!enabled || liveEdit) return;
+      const button=document.createElement('button'); button.className='live-append';
+      button.textContent='继续写…'; button.onclick=()=>beginLiveEdit(null);
+      page.append(button);
+    }
+    function liveNodeRange(node, source) {
+      const rows=sourceLineRanges(source);
+      const parts=[...(node.matches('[data-source-line]')?[node]:[]),...node.querySelectorAll('[data-source-line]')];
+      const first=Math.min(...parts.map(n=>Number(n.dataset.sourceLine)));
+      const last=Math.max(...parts.map(n=>Number(n.dataset.sourceEnd || Number(n.dataset.sourceLine)+1)));
+      if (!Number.isFinite(first) || first<0 || first>=rows.length) return null;
+      return {start:rows[first].start,end:rows[Math.min(rows.length-1,last-1)].end};
+    }
+    function updateLiveText(edit) {
+      if (edit.composing || liveEdit!==edit) return;
+      const text=edit.input.value;
+      const next=edit.prefix+(text?edit.padding:'')+text+edit.suffix;
+      rememberDocumentEdit(edit.tab,edit.tab.source,next);
+      edit.tab.source=next;
+      sourceEditor.value=next;
+      edit.input.style.height='auto'; edit.input.style.height=Math.min(480,Math.max(48,edit.input.scrollHeight))+'px';
+      drawTabs(); scheduleSession();
+      clearTimeout(edit.timer);
+      edit.timer=setTimeout(()=>{
+        if (edit.composing || liveEdit!==edit) return;
+        edit.preview.innerHTML=render(edit.input.value);
+        diagramsReady=renderMermaidBlocks(false,edit.preview);
+        drawOutline();
+      },180);
+      clearTimeout(autoSaveTimers.get(edit.tab));
+      if (edit.tab.path) autoSaveTimers.set(edit.tab,setTimeout(()=>{
+        if (edit.composing || !tabs.includes(edit.tab)) return;
+        edit.tab.savedSource=edit.tab.source; drawTabs(); scheduleSession();
+      },1000));
+    }
+    function beginLiveEdit(node) {
+      if (mode!=='live') return;
+      if (liveEdit) {
+        const old=liveEdit, desired=node?liveNodeRange(node,old.baseSource):null;
+        const shift=old.tab.source.length-old.baseSource.length;
+        const location=desired?desired.start+(desired.start>=old.originalEnd?shift:0):old.tab.source.length;
+        finishLiveEdit(true,true);
+        if (!node) {beginLiveEdit(null);return;}
+        const candidates=[...page.querySelectorAll('[data-source-line]')];
+        const next=candidates.find(item=>{const span=liveNodeRange(item,tabs[active].source);return span && location>=span.start && location<span.end;});
+        if (next) beginLiveEdit(next.closest('table,ul,ol,blockquote') || next);
+        return;
+      }
+      const tab=tabs[active], range=node?liveNodeRange(node,tab.source):{start:tab.source.length,end:tab.source.length};
+      if (!range) return;
+      const wrapper=document.createElement('section'); wrapper.className='live-editor';
+      const header=document.createElement('div'); header.className='live-editor-header';
+      const label=document.createElement('span'); label.textContent='编辑当前段落';
+      const done=document.createElement('button'); done.textContent='完成'; done.onclick=()=>finishLiveEdit(true,true);
+      header.append(label,done);
+      const input=document.createElement('textarea'); input.className='live-source'; input.spellcheck=false; input.setAttribute('aria-label','当前段落 Markdown');
+      input.value=tab.source.slice(range.start,range.end);
+      const preview=document.createElement('div'); preview.className='live-local-preview'; preview.innerHTML=render(input.value);
+      wrapper.append(header,input,preview);
+      const padding=!node && tab.source && !/\r?\n\r?\n$/.test(tab.source)?(tab.source.includes('\r\n')?'\r\n\r\n':'\n\n'):'';
+      const edit={tab,input,preview,wrapper,baseSource:tab.source,originalEnd:range.end,prefix:tab.source.slice(0,range.start),suffix:tab.source.slice(range.end),padding,composing:false};
+      liveEdit=edit;
+      if (node) node.replaceWith(wrapper); else {page.querySelector('.live-append')?.remove();page.append(wrapper);}
+      input.addEventListener('compositionstart',()=>{edit.composing=true;clearTimeout(edit.timer);clearTimeout(autoSaveTimers.get(tab));});
+      input.addEventListener('compositionend',()=>{edit.composing=false;updateLiveText(edit);});
+      input.addEventListener('input',event=>{if (!event.isComposing) updateLiveText(edit);});
+      input.focus(); input.setSelectionRange(input.value.length,input.value.length);
+      input.style.height=Math.min(480,Math.max(48,input.scrollHeight))+'px';
+    }
+    function finishLiveEdit(commit, redraw) {
+      if (!liveEdit) return;
+      const edit=liveEdit;
+      if (commit) {edit.composing=false;updateLiveText(edit);}
+      clearTimeout(edit.timer);liveEdit=null;
+      edit.tab.html=render(edit.tab.source);
+      if (redraw && tabs[active]===edit.tab) {
+        const y=documentScroll.scrollTop;
+        page.innerHTML=edit.tab.html;applyScriptFonts();diagramsReady=renderMermaidBlocks();
+        drawOutline();updateSearch(false);positionReadingArea();installLiveEditing();documentScroll.scrollTop=y;
+      }
+    }
+    page.addEventListener('click',event=>{
+      if (mode!=='live' || event.target.closest('.live-editor,.live-append')) return;
+      let node=event.target.closest('[data-source-line]');
+      if (!node) return;
+      node=node.closest('table,ul,ol,blockquote') || node;
+      event.preventDefault();beginLiveEdit(node);
     });
     function escapeHTML(s) { return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
     function mathHTML(original) {
@@ -785,6 +1026,7 @@ flowchart LR
     }
     page.addEventListener('click', e => {
       const link = e.target.closest('a'); if (!link) return;
+      if (mode === 'live') { e.preventDefault(); return; }
       const href = link.getAttribute('href') || '';
       if (href === '#' || (!/^[a-z]+:/i.test(href) && !href.startsWith('#'))) {
         e.preventDefault(); return;
@@ -797,8 +1039,8 @@ flowchart LR
         heading?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }
     });
-    async function renderMermaidBlocks(forceLight = false) {
-      const blocks = [...page.querySelectorAll('.mermaid-block')];
+    async function renderMermaidBlocks(forceLight = false, root = page) {
+      const blocks = [...root.querySelectorAll('.mermaid-block')];
       const engine = globalThis.mermaid.default || globalThis.mermaid;
       await document.fonts.ready;
       for (const block of blocks) {
@@ -837,7 +1079,7 @@ flowchart LR
     const imageDialog = document.getElementById('imageDialog');
     page.addEventListener('click', event => {
       const image = event.target.closest('.local-image');
-      if (!image) return;
+      if (!image || mode === 'live') return;
       event.preventDefault();
       document.getElementById('enlargedImage').src = image.src;
       imageDialog.showModal();

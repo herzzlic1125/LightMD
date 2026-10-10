@@ -36,6 +36,7 @@ This is a reader I made for my own daily use, with features and typography chose
 
 - Create a file with a custom extension, such as `.md`, `.py`, or `.txt`, and start editing immediately. Non-Markdown files are displayed as plain text.
 - Read multiple Markdown files in one window, including files opened from Finder, dropped into the window, or reached through local document links.
+- Use reading, a two-pane source editor, or live editing: click a rendered block to edit its Markdown in place, see a local preview, then fold it back with Done or Esc.
 - Switch between reading and a two-pane editor. Drag the divider to resize both panes; scroll positions follow corresponding content.
 - Read headings, lists, tables, code, and local images with search and a heading outline.
 - Render inline and display LaTeX mathematics offline.
@@ -50,6 +51,7 @@ This is a reader I made for my own daily use, with features and typography chose
 | --- | --- |
 | Open files | ⌘O, or drop files into the window |
 | New file | ⌘N, or the fourth button at the upper right |
+| Live editing | ⇧⌘L, or the fifth button at the upper right |
 | New tab | ⌘T |
 | Save / Save As | ⌘S / ⇧⌘S |
 | Switch reading and editing modes | ⇧⌘E, or the second button at the upper right |
@@ -58,7 +60,9 @@ This is a reader I made for my own daily use, with features and typography chose
 | Export PDF | ⌥⌘E, or the left button at the upper right |
 | Change text size | ⌘+ / ⌘− / ⌘0 |
 
-The first two-pane view starts at 40% source and 60% preview. Both sides reflow while you drag the divider. A new untitled file needs a location on its first save. When a file changes outside LightMD, the app preserves your draft and offers Save As rather than overwriting that change. Session data is stored at `~/Library/Application Support/LightMD/session.json`.
+The first two-pane view starts at 40% source and 60% preview. Both sides reflow while you drag the divider. Drag the left edge of the outline to resize it; the reading scrollbar stays alongside the document. A new untitled file needs a location on its first save. When a file changes outside LightMD, the app preserves your draft and offers Save As rather than overwriting that change. Session data is stored at `~/Library/Application Support/LightMD/session.json`.
+
+Chinese input composition stays in the native editor until you commit it; preview updates and automatic saving resume after the commit.
 
 Mathematics supports `$…$`, `$$…$$`, `\(…\)`, and `\[…\]`. Failed expressions remain visible as source.
 

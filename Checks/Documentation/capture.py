@@ -31,7 +31,7 @@ for checkout, subdir in [('swift-cmark', 'extensions/include'), ('swift-cmark', 
 objects = (release / 'LightMD.product/Objects.LinkFileList').read_text().splitlines()
 objects = [obj for obj in objects if '/LightMD.build/' not in obj]
 run('swiftc', *flags, work / 'LightMD-test.swift',
-    *[root / name for name in ['EditorSupport.swift', 'SessionStore.swift',
+    *[root / name for name in ['EditorSupport.swift', 'DocumentEditing.swift', 'LiveEditing.swift', 'SessionStore.swift',
                                'MathMarkup.swift', 'MathRenderer.swift', 'MediaSupport.swift',
                                'WebRenderSupport.swift', 'MermaidSupport.swift', 'PDFExport.swift']],
     work / 'WindowChrome-test.swift', root / 'Checks/Documentation/CaptureReading.swift', *objects, '-o', work / 'capture-reading')

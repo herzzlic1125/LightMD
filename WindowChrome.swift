@@ -19,6 +19,9 @@ private struct ChromeCapsuleControls: View {
     let onOutline: () -> Void
     let onExport: () -> Void
     let onNewFile: () -> Void
+    var isLiveEditing = false
+    var canLiveEdit = true
+    var onLiveMode: () -> Void = {}
 
     var body: some View {
         HStack(spacing: 0) {
@@ -56,6 +59,14 @@ private struct ChromeCapsuleControls: View {
             }
             .help("新建文件… (⌘N)")
             .accessibilityLabel("新建文件")
+            Button(action: onLiveMode) {
+                Image(systemName: "square.and.pencil")
+                    .font(.system(size: 16, weight: .regular))
+                    .foregroundStyle(isLiveEditing ? Color.accentColor : Color.primary)
+            }
+            .disabled(!canLiveEdit)
+            .help(isLiveEditing ? "退出即时编辑模式" : "切换到即时编辑模式")
+            .accessibilityLabel(isLiveEditing ? "退出即时编辑模式" : "切换到即时编辑模式")
         }
         .buttonStyle(CapsuleButtonStyle())
         .background(Color(nsColor: .windowBackgroundColor), in: Capsule())
@@ -73,6 +84,9 @@ private final class WindowChromeView: NSView {
     var onOutline: (() -> Void)?
     var onExport: (() -> Void)?
     var onNewFile: (() -> Void)?
+    var isLiveEditing = false
+    var canLiveEdit = true
+    var onLiveMode: (() -> Void)?
 
     private weak var installedWindow: NSWindow?
     private var accessory: NSTitlebarAccessoryViewController?
@@ -112,9 +126,9 @@ private final class WindowChromeView: NSView {
 
     private func install(in window: NSWindow) {
         installedWindow = window
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 146, height: 28))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 180, height: 28))
         let hosting = NSHostingView(rootView: makeControls())
-        hosting.frame = NSRect(x: 4, y: 1, width: 136, height: 26)
+        hosting.frame = NSRect(x: 4, y: 1, width: 170, height: 26)
         container.addSubview(hosting)
         controls = hosting
 
@@ -158,7 +172,9 @@ private final class WindowChromeView: NSView {
                               onMode: { [weak self] in self?.onMode?() },
                               onOutline: { [weak self] in self?.onOutline?() },
                               onExport: { [weak self] in self?.onExport?() },
-                              onNewFile: { [weak self] in self?.onNewFile?() })
+                              onNewFile: { [weak self] in self?.onNewFile?() },
+                              isLiveEditing: isLiveEditing, canLiveEdit: canLiveEdit,
+                              onLiveMode: { [weak self] in self?.onLiveMode?() })
     }
 
     func detach() {
@@ -183,6 +199,9 @@ struct WindowChrome: NSViewRepresentable {
     let onOutline: () -> Void
     let onExport: () -> Void
     let onNewFile: () -> Void
+    var isLiveEditing = false
+    var canLiveEdit = true
+    var onLiveMode: () -> Void = {}
 
     func makeNSView(context: Context) -> NSView {
         let view = WindowChromeView()
@@ -208,6 +227,9 @@ struct WindowChrome: NSViewRepresentable {
         view.onOutline = onOutline
         view.onExport = onExport
         view.onNewFile = onNewFile
+        view.isLiveEditing = isLiveEditing
+        view.canLiveEdit = canLiveEdit
+        view.onLiveMode = onLiveMode
         view.refresh()
     }
 }

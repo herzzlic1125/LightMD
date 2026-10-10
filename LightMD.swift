@@ -118,6 +118,17 @@ struct SearchHit {
     let path: String
 }
 
+// The parser produces a fresh immutable Markdown tree and plain value indexes.
+// It is transferred to the main actor only after worker traversal is finished.
+private struct ParsedPreview: @unchecked Sendable {
+    let document: Document?
+    let tokens: [String: MathToken]
+    let lines: [String]?
+    let outline: [OutlineEntry]
+    let index: [IndexedBlock]
+    let spans: [String: SourceLineSpan]
+}
+
 @MainActor
 struct ReaderTab: Identifiable {
     let id: UUID
@@ -173,6 +184,7 @@ final class ReaderState: ObservableObject {
     @Published var tabs: [ReaderTab]
     @Published var selectedID: UUID {
         willSet {
+            if selectedID != newValue { beforeTabChange?() }
             if selectedID != newValue, let bookmark = captureCurrentBookmark?() {
                 readingBookmarks[selectedID] = bookmark
             }
@@ -181,7 +193,17 @@ final class ReaderState: ObservableObject {
     }
     @Published var fontSize: CGFloat = 16
     @Published var showsOutline = false
-    @Published var isEditing = false
+    @Published var mode: ReaderMode = .reading
+    @Published var sourceSelectionRequest: SourceSelectionRequest?
+    var isEditing: Bool {
+        get { mode == .source }
+        set { if newValue { mode = .source } else if mode == .source { mode = .reading } }
+    }
+    var isLiveEditing: Bool { mode == .live }
+    var canLiveEdit: Bool { !Self.usesPlainText(currentURL) }
+    private var undoManagers: [UUID: UndoManager] = [:]
+    private lazy var undoTarget = DocumentUndoTarget(self)
+    private var sourceSelections: [UUID: NSRange] = [:]
     @Published var isSearching = false
     @Published var searchQuery = ""
     @Published var searchHitIndex = 0
@@ -194,16 +216,22 @@ final class ReaderState: ObservableObject {
     private var fileTimer: Timer?
     private var pendingRefresh: [UUID: Task<Void, Never>] = [:]
     private var pendingParse: [UUID: Task<Void, Never>] = [:]
+    private var parsingWork: [UUID: Task<ParsedPreview?, Never>] = [:]
+    private var composingTabs = Set<UUID>()
     private var pendingAutoSave: [UUID: Task<Void, Never>] = [:]
     private var pendingSessionWrite: Task<Void, Never>?
     private var readingBookmarks: [UUID: ReadingBookmark] = [:]
     private let sessionStore: SessionStore
     let formulas = FormulaCache()
+    weak var liveEditingController: LiveEditingController?
     private let canWriteSession: Bool
     var captureCurrentBookmark: (() -> ReadingBookmark?)?
     var beforeReload: ((UUID) -> Void)?
     var afterReload: ((UUID) -> Void)?
     var beforeModeChange: (() -> Void)?
+    var beforeTabChange: (() -> Void)?
+    var finishEditing: (() -> Void)?
+    var didUndoEditing: ((SourceSelectionRequest) -> Void)?
     var afterModeChange: (() -> Void)?
 
     init(sessionStore: SessionStore = SessionStore()) {
@@ -271,7 +299,54 @@ final class ReaderState: ObservableObject {
     }
     func toggleMode() {
         beforeModeChange?()
-        isEditing.toggle()
+        mode = isEditing ? .reading : .source
+    }
+
+    func toggleLiveEditing() {
+        guard canLiveEdit else { return }
+        beforeModeChange?()
+        mode = isLiveEditing ? .reading : .live
+    }
+
+    func undoManager(for tabID: UUID) -> UndoManager {
+        if let manager = undoManagers[tabID] { return manager }
+        let manager = UndoManager()
+        manager.levelsOfUndo = 300
+        undoManagers[tabID] = manager
+        return manager
+    }
+
+    func recordSourceSelection(_ range: NSRange, in tabID: UUID) { sourceSelections[tabID] = range }
+
+    func undoEditing() {
+        guard !composingTabs.contains(selectedID) else { return }
+        undoManager(for: selectedID).undo()
+    }
+
+    func redoEditing() {
+        guard !composingTabs.contains(selectedID) else { return }
+        undoManager(for: selectedID).redo()
+    }
+
+    private func registerUndo(_ edit: SourceEdit, in tabID: UUID) {
+        undoManager(for: tabID).registerUndo(withTarget: undoTarget) { target in
+            MainActor.assumeIsolated { target.reader?.applyUndo(edit, in: tabID) }
+        }
+        undoManager(for: tabID).setActionName("编辑 Markdown")
+    }
+
+    private func applyUndo(_ edit: SourceEdit, in tabID: UUID) {
+        guard let tab = tabs.first(where: { $0.id == tabID }) else { return }
+        let content = tab.source as NSString
+        let range = NSRange(location: edit.location, length: edit.after.utf16.count)
+        guard NSMaxRange(range) <= content.length,
+              sameSourceBytes(content.substring(with: range), edit.after) else { return }
+        let source = content.replacingCharacters(in: range, with: edit.before)
+        registerUndo(edit.reversed, in: tabID)
+        updateSource(source, in: tabID, selectionAfter: edit.selectionBefore, recordUndo: false)
+        sourceSelections[tabID] = edit.selectionBefore
+        sourceSelectionRequest = SourceSelectionRequest(tabID: tabID, range: edit.selectionBefore)
+        if let request = sourceSelectionRequest { didUndoEditing?(request) }
     }
 
     var searchHits: [SearchHit] {
@@ -307,7 +382,7 @@ final class ReaderState: ObservableObject {
         navigate(to: hits[searchHitIndex].path)
     }
 
-    private static func plainTitle(_ node: Markup) -> String {
+    nonisolated private static func plainTitle(_ node: Markup) -> String {
         if let text = node as? Markdown.Text { return text.string }
         if let code = node as? InlineCode { return code.code }
         if let code = node as? CodeBlock { return code.code }
@@ -315,15 +390,11 @@ final class ReaderState: ObservableObject {
         return node.children.map { plainTitle($0) }.joined()
     }
 
-    private static func readableTitle(_ node: Markup, tokens: [String: MathToken]) -> String {
-        var title = plainTitle(node)
-        for token in tokens.values {
-            title = title.replacingOccurrences(of: token.marker, with: token.original)
-        }
-        return title
+    nonisolated private static func readableTitle(_ node: Markup, tokens: [String: MathToken]) -> String {
+        MathMarkup.readable(plainTitle(node), tokens: tokens)
     }
 
-    private static func slug(_ title: String) -> String {
+    nonisolated private static func slug(_ title: String) -> String {
         var output = ""
         var lastWasHyphen = false
         for scalar in title.lowercased().unicodeScalars {
@@ -338,7 +409,7 @@ final class ReaderState: ObservableObject {
         return output.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     }
 
-    private static func collectHeadings(_ node: Markup, path: String,
+    nonisolated private static func collectHeadings(_ node: Markup, path: String,
                                         tokens: [String: MathToken], into entries: inout [OutlineEntry]) {
         if let heading = node as? Heading {
             entries.append(OutlineEntry(id: path, title: readableTitle(heading, tokens: tokens), level: heading.level,
@@ -349,7 +420,7 @@ final class ReaderState: ObservableObject {
         }
     }
 
-    private static func outline(for document: Document, tokens: [String: MathToken] = [:]) -> [OutlineEntry] {
+    nonisolated static func outline(for document: Document, tokens: [String: MathToken] = [:]) -> [OutlineEntry] {
         var entries: [OutlineEntry] = []
         for (index, block) in document.children.enumerated() {
             collectHeadings(block, path: String(index), tokens: tokens, into: &entries)
@@ -364,19 +435,19 @@ final class ReaderState: ObservableObject {
         }
     }
 
-    private static func index(for document: Document, tokens: [String: MathToken] = [:]) -> [IndexedBlock] {
+    nonisolated private static func index(for document: Document, tokens: [String: MathToken] = [:]) -> [IndexedBlock] {
         document.children.enumerated().map { index, block in
             IndexedBlock(path: String(index), text: readableTitle(block, tokens: tokens))
         }
     }
 
-    private static func scrollSpans(for document: Document,
+    nonisolated private static func scrollSpans(for document: Document,
                                     tokens: [String: MathToken] = [:]) -> [String: SourceLineSpan] {
         var lines: [String: SourceLineSpan] = [:]
         func collect(_ block: Markup, path: String) {
             if let range = block.range {
                 let end = range.upperBound.line + (range.upperBound.column > 1 ? 1 : 0)
-                let embedded = tokens.values.filter { plainTitle(block).contains($0.marker) }
+                let embedded = MathMarkup.tokens(in: plainTitle(block), from: tokens)
                 lines[path] = SourceLineSpan(start: range.lowerBound.line,
                                              end: max(range.lowerBound.line + 1,
                                                       max(end, embedded.map { $0.lastLine + 1 }.max() ?? end)))
@@ -540,27 +611,50 @@ final class ReaderState: ObservableObject {
         }
     }
 
-    func updateSource(_ source: String, in tabID: UUID) {
+    func setSourceComposition(_ composing: Bool, in tabID: UUID) {
+        if composing {
+            composingTabs.insert(tabID)
+            pendingParse.removeValue(forKey: tabID)?.cancel()
+            parsingWork.removeValue(forKey: tabID)?.cancel()
+            pendingAutoSave.removeValue(forKey: tabID)?.cancel()
+        } else if composingTabs.remove(tabID) != nil,
+                  let index = tabs.firstIndex(where: { $0.id == tabID }) {
+            scheduleSourceUpdates(at: index)
+        }
+    }
+
+    func updateSource(_ source: String, in tabID: UUID, selectionAfter: NSRange? = nil,
+                      recordUndo: Bool = true) {
         guard let index = tabs.firstIndex(where: { $0.id == tabID }),
               !sameSourceBytes(tabs[index].source, source) else { return }
-        tabs[index].source = source
-        if !tabs[index].isDirty { tabs[index].autoSaveError = nil }
-        tabs[index].editRevision &+= 1
-        scheduleSessionWrite()
-        let revision = tabs[index].editRevision
-        pendingParse[tabID]?.cancel()
-        pendingParse[tabID] = Task { @MainActor [weak self] in
-            do { try await Task.sleep(nanoseconds: 180_000_000) }
-            catch { return }
-            self?.publishPreview(for: tabID, revision: revision)
+        var tab = tabs[index]
+        if recordUndo {
+            registerUndo(SourceEdit.difference(from: tab.source, to: source,
+                selection: sourceSelections[tabID] ?? NSRange(location: 0, length: 0),
+                selectionAfter: selectionAfter), in: tabID)
         }
-        pendingAutoSave[tabID]?.cancel()
-        pendingAutoSave[tabID] = nil
-        guard tabs[index].url != nil, tabs[index].isDirty, !tabs[index].externalConflict else { return }
+        tab.source = source
+        if !tab.isDirty { tab.autoSaveError = nil }
+        tab.editRevision &+= 1
+        tabs[index] = tab
+        if let selectionAfter { sourceSelections[tabID] = selectionAfter }
+        scheduleSessionWrite()
+        scheduleSourceUpdates(at: index)
+    }
+
+    private func scheduleSourceUpdates(at index: Int) {
+        let tab = tabs[index], tabID = tab.id, revision = tab.editRevision
+        pendingParse.removeValue(forKey: tabID)?.cancel()
+        parsingWork.removeValue(forKey: tabID)?.cancel()
+        pendingAutoSave.removeValue(forKey: tabID)?.cancel()
+        guard !composingTabs.contains(tabID) else { return }
+        publishPreview(for: tabID, revision: revision)
+        guard tab.url != nil, tab.isDirty, !tab.externalConflict else { return }
         pendingAutoSave[tabID] = Task { @MainActor [weak self] in
             do { try await Task.sleep(nanoseconds: 1_000_000_000) }
             catch { return }
-            guard let self, let tab = self.tabs.first(where: { $0.id == tabID }),
+            guard let self, !self.composingTabs.contains(tabID),
+                  let tab = self.tabs.first(where: { $0.id == tabID }),
                   tab.editRevision == revision else { return }
             self.pendingAutoSave[tabID] = nil
             guard tab.isDirty, !tab.externalConflict, let url = tab.url else { return }
@@ -569,35 +663,61 @@ final class ReaderState: ObservableObject {
     }
 
     private func publishPreview(for tabID: UUID, revision: UInt64) {
-        guard let index = tabs.firstIndex(where: { $0.id == tabID }),
-              tabs[index].editRevision == revision else { return }
-        let source = tabs[index].source
-        if Self.usesPlainText(tabs[index].url) {
-            tabs[index].mathTokens = [:]
-            let normalized = source.replacingOccurrences(of: "\r\n", with: "\n")
-                .replacingOccurrences(of: "\r", with: "\n")
-            let lines = normalized.components(separatedBy: "\n")
-            tabs[index].plainLines = lines
-            tabs[index].document = nil
-            tabs[index].outline = []
-            tabs[index].index = lines.enumerated().map { IndexedBlock(path: String($0.offset), text: $0.element) }
-            tabs[index].scrollSpans = Dictionary(uniqueKeysWithValues: lines.indices.map { (String($0), SourceLineSpan(start: $0 + 1, end: $0 + 2)) })
-        } else {
-            let prepared = MathMarkup.prepare(source)
-            let document = Document(parsing: prepared.text)
-            tabs[index].mathTokens = prepared.tokens
-            tabs[index].document = document
-            tabs[index].outline = Self.outline(for: document, tokens: prepared.tokens)
-            tabs[index].index = Self.index(for: document, tokens: prepared.tokens)
-            tabs[index].scrollSpans = Self.scrollSpans(for: document, tokens: prepared.tokens)
-            tabs[index].plainLines = nil
+        pendingParse.removeValue(forKey: tabID)?.cancel()
+        parsingWork.removeValue(forKey: tabID)?.cancel()
+        pendingParse[tabID] = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: 180_000_000) }
+            catch { return }
+            guard let self, let tab = self.tabs.first(where: { $0.id == tabID }),
+                  tab.editRevision == revision, !self.composingTabs.contains(tabID) else { return }
+            let source = tab.source, plain = Self.usesPlainText(tab.url)
+            let work = Task.detached(priority: .userInitiated) {
+                Self.parsePreview(source, plain: plain)
+            }
+            self.parsingWork[tabID] = work
+            guard let preview = await work.value, !Task.isCancelled,
+                  let index = self.tabs.firstIndex(where: { $0.id == tabID }),
+                  self.tabs[index].editRevision == revision,
+                  !self.composingTabs.contains(tabID) else { return }
+            var updated = self.tabs[index]
+            updated.mathTokens = preview.tokens
+            updated.document = preview.document
+            updated.plainLines = preview.lines
+            updated.outline = preview.outline
+            updated.index = preview.index
+            updated.scrollSpans = preview.spans
+            updated.previewID = UUID()
+            self.tabs[index] = updated
+            self.pendingParse[tabID] = nil
+            self.parsingWork[tabID] = nil
         }
-        tabs[index].previewID = UUID()
-        pendingParse[tabID] = nil
+    }
+
+    nonisolated private static func parsePreview(_ source: String, plain: Bool) -> ParsedPreview? {
+        guard !Task.isCancelled else { return nil }
+        if plain {
+            let lines = source.replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n").components(separatedBy: "\n")
+            return ParsedPreview(document: nil, tokens: [:], lines: lines, outline: [],
+                index: lines.enumerated().map { IndexedBlock(path: String($0.offset), text: $0.element) },
+                spans: Dictionary(uniqueKeysWithValues: lines.indices.map {
+                    (String($0), SourceLineSpan(start: $0 + 1, end: $0 + 2))
+                }))
+        }
+        let prepared = MathMarkup.prepare(source)
+        guard !Task.isCancelled else { return nil }
+        let document = Document(parsing: prepared.text)
+        let outline = outline(for: document, tokens: prepared.tokens)
+        guard !Task.isCancelled else { return nil }
+        let index = index(for: document, tokens: prepared.tokens)
+        let spans = scrollSpans(for: document, tokens: prepared.tokens)
+        guard !Task.isCancelled else { return nil }
+        return ParsedPreview(document: document, tokens: prepared.tokens, lines: nil,
+                             outline: outline, index: index, spans: spans)
     }
 
     @discardableResult
-    func saveCurrent() -> Bool { save(tabID: selectedID) }
+    func saveCurrent() -> Bool { finishEditing?(); return save(tabID: selectedID) }
 
     @discardableResult
     func saveAsCurrent() -> Bool { saveAs(tabID: selectedID) }
@@ -694,7 +814,7 @@ final class ReaderState: ObservableObject {
               let url = tabs[index].url, let stamp = Self.stamp(for: url),
               let data = try? Data(contentsOf: url),
               let decoded = try? Self.decode(data) else { return }
-        if tabs[index].isDirty {
+        if tabs[index].isDirty || composingTabs.contains(tabID) || liveEditingController?.active?.tabID == tabID {
             if sameSourceBytes(decoded.text, tabs[index].source) {
                 tabs[index].savedSource = decoded.text
                 tabs[index].savedData = data
@@ -714,6 +834,9 @@ final class ReaderState: ObservableObject {
             return
         }
         if selectedID == tabID { beforeReload?(tabID) }
+        undoManagers[tabID]?.removeAllActions()
+        sourceSelections.removeValue(forKey: tabID)
+        if sourceSelectionRequest?.tabID == tabID { sourceSelectionRequest = nil }
         tabs[index] = Self.makeTab(id: tabID, url: url, text: decoded.text,
                                   encoding: decoded.name, stamp: stamp, data: data)
         if selectedID == tabID {
@@ -777,6 +900,7 @@ final class ReaderState: ObservableObject {
     }
 
     func confirmCloseAll() -> Bool {
+        finishEditing?()
         for tab in tabs where tab.isDirty && tab.url != nil && !tab.externalConflict {
             if let url = tab.url { _ = write(tabID: tab.id, to: url, saveAs: false, automatic: true) }
         }
@@ -784,10 +908,15 @@ final class ReaderState: ObservableObject {
     }
 
     func closeTab(_ id: UUID) {
+        if id == selectedID { finishEditing?() }
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
         guard confirmDiscardChanges(in: id) else { return }
         pendingParse[id]?.cancel()
         pendingParse[id] = nil
+        parsingWork.removeValue(forKey: id)?.cancel()
+        composingTabs.remove(id)
+        undoManagers.removeValue(forKey: id)
+        sourceSelections.removeValue(forKey: id)
         pendingRefresh[id]?.cancel()
         pendingRefresh[id] = nil
         pendingAutoSave[id]?.cancel()
@@ -939,7 +1068,7 @@ private struct PreviewScrollAnchorKey: PreferenceKey {
     }
 }
 
-private extension View {
+extension View {
     func previewScrollAnchor(_ path: String) -> some View {
         background(GeometryReader { geometry in
             Color.clear.preference(key: PreviewScrollAnchorKey.self,
@@ -955,13 +1084,16 @@ private struct PreviewDocumentContent: View, Equatable {
     let document: Document?
     let fontSize: CGFloat
     let activeSearchPath: String?
-    let mathTokens: [MathToken]
+    let mathTokens: [String: MathToken]
+    let documentURL: URL?
+    let onOpenImage: (URL) -> Void
     @EnvironmentObject private var formulaCache: FormulaCache
     @Environment(\.displayScale) private var displayScale
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.tabID == rhs.tabID && lhs.previewID == rhs.previewID
             && lhs.fontSize == rhs.fontSize && lhs.activeSearchPath == rhs.activeSearchPath
+            && lhs.documentURL == rhs.documentURL
     }
 
     var body: some View {
@@ -977,7 +1109,8 @@ private struct PreviewDocumentContent: View, Equatable {
                 }
             } else {
                 ForEach(Array((document.map { Array($0.children) } ?? []).enumerated()), id: \.offset) { index, block in
-                    MarkdownBlockView(block: block, fontSize: fontSize, path: String(index))
+                    MarkdownBlockView(block: block, fontSize: fontSize, path: String(index),
+                                      mathTokens: mathTokens, documentURL: documentURL, onOpenImage: onOpenImage)
                         .background(activeSearchPath == String(index)
                                     ? Color.yellow.opacity(0.16) : Color.clear)
                         .id("document:\(index)")
@@ -985,7 +1118,7 @@ private struct PreviewDocumentContent: View, Equatable {
             }
         }
         .task(id: "\(previewID):\(fontSize):\(displayScale)") {
-            formulaCache.prefetch(mathTokens, fontSize: fontSize, displayScale: displayScale)
+            formulaCache.prefetch(mathTokens.values.sorted { $0.firstLine < $1.firstLine }, fontSize: fontSize, displayScale: displayScale)
         }
     }
 }
@@ -1050,6 +1183,8 @@ struct ReaderView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var scrollKeeper = ScrollKeeper()
     @State private var scrollSync = ScrollSyncController()
+    @StateObject private var liveEditor = LiveEditingController()
+    @State private var sourceTextView: NSTextView?
     @FocusState private var searchFocused: Bool
     @State private var animatedOutlineInset: CGFloat = 0
     @State private var outlineBeforeEditing = false
@@ -1059,8 +1194,8 @@ struct ReaderView: View {
     @State private var modeTransitioning = false
     @State private var modeGeneration = 0
     @State private var pendingModeCommit: Task<Void, Never>?
+    @State private var outlineWidth: CGFloat = 221
 
-    private let outlineWidth: CGFloat = 221
     private let outlineDuration = 0.28
     private let modeDuration = 0.28
 
@@ -1089,6 +1224,15 @@ struct ReaderView: View {
         }
         withAnimation(.easeInOut(duration: outlineDuration)) {
             animatedOutlineInset = target
+        }
+    }
+
+    private func resizeOutline(to preferred: CGFloat, available: CGFloat) {
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            outlineWidth = OutlineLayout.width(preferred, in: available)
+            animatedOutlineInset = state.showsOutline ? outlineWidth : 0
         }
     }
 
@@ -1193,7 +1337,7 @@ struct ReaderView: View {
                 .padding(.vertical, 6)
             }
         }
-        .frame(width: 220)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var searchBar: some View {
@@ -1285,7 +1429,7 @@ struct ReaderView: View {
                 .background(Color.orange.opacity(0.12))
             }
             if state.currentURL == nil && state.currentTab?.source.isEmpty != false
-                && !state.isEditing && !editorMounted {
+                && state.mode == .reading && !editorMounted {
                 VStack(spacing: 14) {
                     Image(systemName: "doc.text")
                         .font(.system(size: 44))
@@ -1317,8 +1461,19 @@ struct ReaderView: View {
                                                  scrollSync.invalidateSource()
                                                  state.updateSource($0, in: tabID)
                                              },
-                                             onScrollView: { scrollSync.attachSource($0) },
-                                             onTextApplied: { scrollSync.invalidateSource() })
+                                             onScrollView: {
+                                                 sourceTextView = $0.documentView as? NSTextView
+                                                 scrollSync.attachSource($0)
+                                             },
+                                             onTextApplied: { scrollSync.invalidateSource() },
+                                             onCompositionChanged: { state.setSourceComposition($0, in: tabID) },
+                                             documentUndoManager: state.undoManager(for: tabID),
+                                             onCommittedChange: { text, selection in
+                                                 scrollSync.invalidateSource()
+                                                 state.updateSource(text, in: tabID, selectionAfter: selection)
+                                             },
+                                             onSelectionChanged: { state.recordSourceSelection($0, in: tabID) },
+                                             selectionRequest: state.sourceSelectionRequest?.tabID == tabID ? state.sourceSelectionRequest : nil)
                             .id(tabID)
                             .frame(width: sourceWidth, height: splitGeometry.size.height)
                             .frame(width: visibleSourceWidth, height: splitGeometry.size.height,
@@ -1345,17 +1500,33 @@ struct ReaderView: View {
                     ScrollViewReader { proxy in
                     GeometryReader { geometry in
                         let width = geometry.size.width
+                        let sidebarWidth = OutlineLayout.width(outlineWidth, in: width)
+                        let sidebarInset = min(1, max(0, outlineInset / max(1, outlineWidth))) * sidebarWidth
+                        let contentWidth = max(1, width - sidebarInset)
+                        let outlineLimits = OutlineLayout.limits(in: width)
                         ZStack(alignment: .topLeading) {
-                            ScrollView {
+                            ScrollView(.vertical, showsIndicators: true) {
+                                Group {
+                                if state.isLiveEditing && state.canLiveEdit {
+                                    LiveDocumentContent(controller: liveEditor,
+                                        presentationID: liveEditor.presentationID,
+                                        fontSize: state.fontSize, documentURL: state.currentURL, reader: state)
+                                        .equatable()
+                                } else {
                                 PreviewDocumentContent(tabID: state.selectedID,
                                                        previewID: state.currentTab?.previewID ?? state.selectedID,
                                                        lines: state.currentLines,
                                                        document: state.currentDocument,
                                                        fontSize: state.fontSize,
                                                        activeSearchPath: state.activeSearchPath,
-                                                       mathTokens: state.currentMathTokens.values.sorted { $0.firstLine < $1.firstLine })
+                                                       mathTokens: state.currentMathTokens,
+                                                       documentURL: state.currentURL,
+                                                       onOpenImage: { state.imagePreviewURL = $0 })
                                 .equatable()
+                                }
+                                }
                                 .background(ScrollResolver {
+                                    $0.identifier = NSUserInterfaceItemIdentifier("readingPreviewScroll")
                                     scrollKeeper.scrollView = $0
                                     scrollSync.attachPreview($0, tabID: previewTabID,
                                                              reveal: { proxy.scrollTo("document:\($0)", anchor: .top) },
@@ -1364,29 +1535,62 @@ struct ReaderView: View {
                                     })
                                 }
                                     .frame(width: 0, height: 0))
-                                .frame(width: textWidth(for: outlineInset, available: width), alignment: .leading)
+                                .frame(width: textWidth(for: 0, available: contentWidth), alignment: .leading)
                                 .padding(.vertical, 18)
                                 .coordinateSpace(name: "previewContent")
                                 .textSelection(.enabled)
-                                .offset(x: textX(for: outlineInset, available: width))
-                                .frame(width: width, alignment: .leading)
+                                .offset(x: textX(for: 0, available: contentWidth))
+                                .frame(width: contentWidth, alignment: .leading)
                             }
+                            .scrollIndicators(.visible)
                             .id(state.selectedID)
-                            .frame(width: width)
+                            .frame(width: contentWidth)
+                            .onChange(of: liveEditor.active?.id) { id in
+                                guard id != nil, liveEditor.shouldReveal else { return }
+                                DispatchQueue.main.async {
+                                    guard liveEditor.active?.id == id, state.isLiveEditing else { return }
+                                    if let blockID = liveEditor.active?.blockID,
+                                       let block = liveEditor.document?.blocks.first(where: { $0.id == blockID }) {
+                                        proxy.scrollTo("document:\(block.path)", anchor: .center)
+                                    } else { proxy.scrollTo("live-end", anchor: .bottom) }
+                                }
+                            }
                             .onPreferenceChange(PreviewScrollAnchorKey.self) { anchors in
                                 scrollSync.updateAnchors(anchors,
                                                          spans: state.currentTab?.scrollSpans ?? [:])
                             }
 
                             HStack(spacing: 0) {
-                                Divider()
+                                // Keep the handle inside the sidebar so its hit area
+                                // cannot cover the reading viewport's scrollbar.
+                                SplitHandle(ratio: 1 - sidebarWidth / max(1, width),
+                                            availableWidth: width,
+                                            minimumRatio: 1 - outlineLimits.upperBound / max(1, width),
+                                            maximumRatio: 1 - outlineLimits.lowerBound / max(1, width),
+                                            active: state.showsOutline && !modeTransitioning,
+                                            onDragStarted: {
+                                                scrollSync.capturePreviewPosition()
+                                                scrollSync.beginDividerResize()
+                                            },
+                                            onRatioChanged: { resizeOutline(to: width * (1 - $0), available: width) },
+                                            onDragEnded: {
+                                                scrollSync.endDividerResize()
+                                                DispatchQueue.main.async {
+                                                    _ = scrollSync.restorePreviewPosition()
+                                                    scrollSync.alignSourceToPreview()
+                                                }
+                                            },
+                                            accessibilityLabel: "调整目录宽度",
+                                            identifier: "outlineResizeHandle")
+                                    .frame(width: 8)
                                 outlineSidebar { entry in
-                                    scrollSync.navigatePreview(to: entry.id)
+                                    if state.isLiveEditing { liveEditor.navigate(entry) }
+                                    else { scrollSync.navigatePreview(to: entry.id) }
                                 }
                             }
-                            .frame(width: outlineWidth, alignment: .leading)
+                            .frame(width: sidebarWidth, alignment: .leading)
                             .background(Color(nsColor: .windowBackgroundColor))
-                            .offset(x: width - outlineInset)
+                            .offset(x: width - sidebarInset)
                             .allowsHitTesting(state.showsOutline)
                             .accessibilityHidden(!state.showsOutline)
                         }
@@ -1417,7 +1621,10 @@ struct ReaderView: View {
                                  onMode: { state.toggleMode() },
                                  onOutline: { state.showsOutline.toggle() },
                                  onExport: { state.exportPDF() },
-                                 onNewFile: { state.chooseNewFile() })
+                                 onNewFile: { state.chooseNewFile() },
+                                 isLiveEditing: state.isLiveEditing,
+                                 canLiveEdit: state.canLiveEdit,
+                                 onLiveMode: { state.toggleLiveEditing() })
             .frame(width: 0, height: 0))
         .environmentObject(state)
         .environmentObject(state.formulas)
@@ -1436,6 +1643,8 @@ struct ReaderView: View {
             return true
         }
         .onAppear {
+            liveEditor.configure(state)
+            state.liveEditingController = liveEditor
             state.captureCurrentBookmark = { [weak scrollSync] in scrollSync?.currentBookmark() }
             scrollSync.queueRestoration(state.bookmark(for: state.selectedID), for: state.selectedID)
             settleOutline()
@@ -1447,8 +1656,28 @@ struct ReaderView: View {
                 if reader?.selectedID == tabID { keeper?.restore() }
             }
             state.beforeModeChange = { [weak keeper, weak scrollSync] in
+                if let sourceTextView, sourceTextView.hasMarkedText() { sourceTextView.unmarkText() }
+                liveEditor.leave()
                 keeper?.captureIfNeeded()
                 scrollSync?.capturePreviewPosition()
+            }
+            state.beforeTabChange = {
+                if let sourceTextView, sourceTextView.hasMarkedText() { sourceTextView.unmarkText() }
+                liveEditor.leave()
+            }
+            state.finishEditing = {
+                if let sourceTextView, sourceTextView.hasMarkedText() { sourceTextView.unmarkText() }
+                if state.isLiveEditing { liveEditor.fold() }
+            }
+            state.didUndoEditing = { request in
+                guard request.tabID == state.selectedID else { return }
+                if state.isLiveEditing { liveEditor.undo(request) }
+                else if state.isEditing, let sourceTextView {
+                    sourceTextView.string = state.currentTab?.source ?? ""
+                    let length = (sourceTextView.string as NSString).length
+                    let start = min(length, max(0, request.range.location))
+                    sourceTextView.setSelectedRange(NSRange(location: start, length: min(request.range.length, length - start)))
+                }
             }
             state.afterModeChange = { [weak keeper, weak scrollSync] in
                 if scrollSync?.restorePreviewPosition() == true {
@@ -1460,6 +1689,11 @@ struct ReaderView: View {
             }
         }
         .onChange(of: state.showsOutline) { transitionOutline(to: $0) }
+        .onChange(of: state.mode) { mode in
+            if mode == .live { liveEditor.enter() }
+            else { liveEditor.leave() }
+        }
+        .onChange(of: state.sourceSelectionRequest?.id) { _ in liveEditor.undo(state.sourceSelectionRequest) }
         .onChange(of: state.isEditing) { editing in
             if editing {
                 outlineBeforeEditing = state.showsOutline
@@ -1470,6 +1704,10 @@ struct ReaderView: View {
             transitionMode(to: editing)
         }
         .onChange(of: state.selectedID) { tabID in
+            if state.isLiveEditing {
+                if state.canLiveEdit { liveEditor.enter() }
+                else { state.mode = .reading }
+            }
             scrollSync.queueRestoration(state.bookmark(for: tabID), for: tabID)
             settleOutline()
             settleMode()
@@ -1489,6 +1727,7 @@ struct ReaderView: View {
             scrollSync.updateSpans(lines ?? [:])
         }
         .onChange(of: state.currentTab?.previewID) { _ in
+            if state.isLiveEditing { liveEditor.refresh() }
             _ = scrollSync.beginPreviewNavigation()
             scrollSync.invalidateSource()
         }
@@ -1506,6 +1745,8 @@ struct ReaderView: View {
             if let first = state.searchHits.first { state.navigate(to: first.path) }
         }
         .onDisappear {
+            liveEditor.leave()
+            state.liveEditingController = nil
             _ = state.saveSessionNow()
             state.captureCurrentBookmark = nil
             pendingModeCommit?.cancel()
@@ -1515,6 +1756,9 @@ struct ReaderView: View {
             state.beforeReload = nil
             state.afterReload = nil
             state.beforeModeChange = nil
+            state.beforeTabChange = nil
+            state.finishEditing = nil
+            state.didUndoEditing = nil
             state.afterModeChange = nil
         }
         .alert("PDF 导出", isPresented: Binding(
@@ -1532,13 +1776,15 @@ struct ReaderView: View {
 }
 
 struct MarkdownBlockView: View {
-    @EnvironmentObject private var reader: ReaderState
     @EnvironmentObject private var formulaCache: FormulaCache
     @StateObject private var formulaUpdates = FormulaUpdates()
     @Environment(\.displayScale) private var displayScale
     let block: Markup
     let fontSize: CGFloat
     let path: String
+    let mathTokens: [String: MathToken]
+    let documentURL: URL?
+    let onOpenImage: (URL) -> Void
 
     private enum ParagraphPart {
         case text([Markup])
@@ -1591,7 +1837,7 @@ struct MarkdownBlockView: View {
         guard let regex = try? NSRegularExpression(pattern: "\\uE000LM[0-9]+\\uE001") else { return [] }
         return regex.matches(in: content, range: NSRange(content.startIndex..., in: content)).compactMap {
             guard let range = Range($0.range, in: content) else { return nil }
-            return reader.currentMathTokens[String(content[range])]
+            return mathTokens[String(content[range])]
         }
     }
 
@@ -1607,7 +1853,7 @@ struct MarkdownBlockView: View {
             result = result + styledReadingText(String(remaining[..<range.lowerBound]), size: size,
                                         strong: strong, emphasized: emphasized, heading: heading)
             let marker = String(remaining[range])
-            if let token = reader.currentMathTokens[marker] {
+            if let token = mathTokens[marker] {
                 switch formulaCache.result(for: token, fontSize: size, displayScale: displayScale, observer: formulaUpdates) {
                 case .image(let rendered):
                     result = result + SwiftUI.Text(SwiftUI.Image(nsImage: rendered.image).renderingMode(.template))
@@ -1732,7 +1978,7 @@ struct MarkdownBlockView: View {
             if linked.characters.isEmpty { linked = AttributedString(destination) }
             if let absolute = URL(string: destination), let scheme = absolute.scheme, !scheme.isEmpty {
                 linked.link = absolute
-            } else if let base = reader.currentURL {
+            } else if let base = documentURL {
                 let beforeFragment = String(destination.split(separator: "#", maxSplits: 1,
                                                               omittingEmptySubsequences: false)[0])
                 let rawPath = String(beforeFragment.split(separator: "?", maxSplits: 1,
@@ -1769,14 +2015,14 @@ struct MarkdownBlockView: View {
                                 children.reduce(SwiftUI.Text("")) { $0 + inline($1) }.lineSpacing(2)
                             case .image(let image):
                                 MarkdownImageView(source: image.source ?? "", alternative: alternativeText(image),
-                                                  documentURL: reader.currentURL,
-                                                  onOpen: { reader.imagePreviewURL = $0 })
+                                                  documentURL: documentURL,
+                                                  onOpen: onOpenImage)
                             }
                         }
                     }
                 } else if let text = Array(paragraph.children).first as? Markdown.Text,
                    Array(paragraph.children).count == 1,
-                   let token = reader.currentMathTokens[text.string], token.display {
+                   let token = mathTokens[text.string], token.display {
                     displayedFormula(token)
                 } else {
                     inline(paragraph)
@@ -1804,7 +2050,8 @@ struct MarkdownBlockView: View {
                             VStack(alignment: .leading, spacing: 6) {
                                 ForEach(Array(item.children.enumerated()), id: \.offset) { childIndex, child in
                                     MarkdownBlockView(block: child, fontSize: fontSize,
-                                                      path: "\(path).\(index).\(childIndex)")
+                                                      path: "\(path).\(index).\(childIndex)",
+                                                      mathTokens: mathTokens, documentURL: documentURL, onOpenImage: onOpenImage)
                                 }
                             }
                         }
@@ -1820,7 +2067,8 @@ struct MarkdownBlockView: View {
                             VStack(alignment: .leading, spacing: 6) {
                                 ForEach(Array(item.children.enumerated()), id: \.offset) { childIndex, child in
                                     MarkdownBlockView(block: child, fontSize: fontSize,
-                                                      path: "\(path).\(index).\(childIndex)")
+                                                      path: "\(path).\(index).\(childIndex)",
+                                                      mathTokens: mathTokens, documentURL: documentURL, onOpenImage: onOpenImage)
                                 }
                             }
                         }
@@ -1834,7 +2082,8 @@ struct MarkdownBlockView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(Array(quote.children.enumerated()), id: \.offset) { index, child in
                             MarkdownBlockView(block: child, fontSize: fontSize,
-                                              path: "\(path).\(index)")
+                                              path: "\(path).\(index)",
+                                              mathTokens: mathTokens, documentURL: documentURL, onOpenImage: onOpenImage)
                         }
                     }
                     .foregroundStyle(.secondary)
@@ -1997,6 +2246,14 @@ struct LightMDApp: App {
             .windowStyle(.hiddenTitleBar)
             .windowToolbarStyle(.unifiedCompact)
             .commands {
+                CommandGroup(replacing: .undoRedo) {
+                    Button("撤销") { reader.undoEditing() }
+                        .keyboardShortcut("z", modifiers: .command)
+                        .disabled(!reader.undoManager(for: reader.selectedID).canUndo)
+                    Button("重做") { reader.redoEditing() }
+                        .keyboardShortcut("z", modifiers: [.command, .shift])
+                        .disabled(!reader.undoManager(for: reader.selectedID).canRedo)
+                }
                 CommandGroup(replacing: .newItem) {
                     Button("新建文件…") { reader.chooseNewFile() }
                         .keyboardShortcut("n", modifiers: .command)
@@ -2028,6 +2285,9 @@ struct LightMDApp: App {
                 CommandGroup(after: .toolbar) {
                     Button(reader.isEditing ? "阅读模式" : "双栏编辑模式") { reader.toggleMode() }
                         .keyboardShortcut("e", modifiers: [.command, .shift])
+                    Button(reader.isLiveEditing ? "退出即时编辑" : "即时编辑") { reader.toggleLiveEditing() }
+                        .keyboardShortcut("l", modifiers: [.command, .shift])
+                        .disabled(!reader.canLiveEdit)
                     Button("显示或隐藏目录") { reader.showsOutline.toggle() }
                         .keyboardShortcut("2", modifiers: .command)
                     Divider()

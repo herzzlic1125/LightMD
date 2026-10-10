@@ -124,7 +124,7 @@ final class PDFHTMLRenderer {
         :root{color-scheme:light}*{box-sizing:border-box}
         html,body{margin:0;padding:0;background:white;color:#252525}
         body{font:\(min(32, max(12, snapshot.fontSize)))px/1.55 'Songti SC',serif;overflow-wrap:anywhere}
-        p{margin:0 0 14px;orphans:3;widows:3}h1,h2,h3,h4,h5,h6{line-height:1.3;break-after:avoid;page-break-after:avoid;margin:18px 0 14px}
+        p{margin:0 0 14px;orphans:3;widows:3;break-inside:avoid;page-break-inside:avoid}h1,h2,h3,h4,h5,h6{line-height:1.3;break-after:avoid;page-break-after:avoid;margin:18px 0 14px}
         h1{font-size:1.6em}h2{font-size:1.5em}h3{font-size:1.25em}h4,h5,h6{font-size:1.1em}
         strong{font-family:'STSongti-SC-Black','Songti SC',serif;font-weight:900}
         em{font-family:'Kaiti SC',serif} .latin{font-family:ui-serif,'New York',Georgia,serif}

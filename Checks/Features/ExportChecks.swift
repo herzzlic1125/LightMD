@@ -104,6 +104,25 @@ import SwiftUI
         precondition(bluePixels > 1000, "Local image missing from PDF pages")
         print("pdf_mermaid_labels_and_local_image_pixels=passed (\(bluePixels) blue pixels)")
         print("full_pdf_a4_pages=\(pdf.pageCount) long_paragraph_segments=650 table_rows=65 tail_and_edit_snapshot=passed")
+        // Ordinary paragraphs must not leave a one-line tail on the next page.
+        // The long 650-segment paragraph above must still split without clipping.
+        let paragraphSource = (0..<18).map { index in
+            "P\(index)_BEGIN " + String(repeating: "完整段落应保持连续排版并保留全部文字。", count: 9) + " P\(index)_END\n\n"
+        }.joined()
+        let paragraphFile = root.appendingPathComponent("paragraph-pagination.pdf")
+        _ = try await PDFExporter.export(PDFSnapshot(source: paragraphSource, fileURL: nil,
+            title: "Paragraph pagination", fontSize: 16), to: paragraphFile)
+        let paragraphPDF = PDFDocument(url: paragraphFile)!
+        let pageTexts = (0..<paragraphPDF.pageCount).map {
+            (paragraphPDF.page(at: $0)?.string ?? "").filter { !$0.isWhitespace }
+        }
+        for index in 0..<18 {
+            let start = pageTexts.firstIndex { $0.contains("P\(index)_BEGIN") }
+            let end = pageTexts.firstIndex { $0.contains("P\(index)_END") }
+            precondition(start != nil && start == end, "Paragraph \(index) split across pages")
+        }
+        precondition(pageTexts.allSatisfy { !$0.isEmpty })
+        print("ordinary_paragraphs_stay_together_18_and_oversized_paragraph_complete=passed")
         // Exporting itself must not mutate the Markdown source; the app's normal autosave may have run.
         precondition(try! String(contentsOf: named, encoding: .utf8) != source)
         let directSource = root.appendingPathComponent("unchanged.md")

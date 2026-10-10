@@ -1,21 +1,114 @@
 import AppKit
 import SwiftUI
 
+// NSTextView does not consistently send textDidChange for marked-text updates.
+// Observe the input-client boundary and defer delegate snapshots until each
+// native input operation has completed, including nested unmarkText calls.
+private final class MarkdownEditingTextView: NSTextView {
+    var documentUndoManager: UndoManager?
+    // AppKit can register private marked-text/typing undo even with allowsUndo
+    // disabled. It must never mix those retired-view actions into document undo.
+    override var undoManager: UndoManager? { documentUndoManager == nil ? super.undoManager : nil }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if let manager = documentUndoManager, !hasMarkedText(), event.modifierFlags.contains(.command),
+           !event.modifierFlags.contains(.option), event.charactersIgnoringModifiers?.lowercased() == "z" {
+            if event.modifierFlags.contains(.shift) { manager.redo() } else { manager.undo() }
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+    var onCompositionStarted: (() -> Void)?
+    var onInputFinished: ((NSTextView) -> Void)?
+    private var inputDepth = 0
+    var isHandlingInput: Bool { inputDepth > 0 }
+
+    override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        inputDepth += 1
+        onCompositionStarted?()
+        super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+        finishInput()
+    }
+
+    override func insertText(_ string: Any, replacementRange: NSRange) {
+        inputDepth += 1
+        super.insertText(string, replacementRange: replacementRange)
+        finishInput()
+    }
+
+    override func unmarkText() {
+        inputDepth += 1
+        super.unmarkText()
+        finishInput()
+    }
+
+    private func finishInput() {
+        inputDepth -= 1
+        if inputDepth == 0 { onInputFinished?(self) }
+    }
+}
+
 struct MarkdownSourceEditor: NSViewRepresentable {
     let text: String
     let onChange: (String) -> Void
     let onScrollView: (NSScrollView) -> Void
     let onTextApplied: () -> Void
+    var onCompositionChanged: (Bool) -> Void = { _ in }
+    var documentUndoManager: UndoManager? = nil
+    var onCommittedChange: ((String, NSRange) -> Void)? = nil
+    var onSelectionChanged: (NSRange) -> Void = { _ in }
+    var selectionRequest: SourceSelectionRequest? = nil
+    var initialSelection: NSRange? = nil
+    var onCommand: ((Selector, NSTextView) -> Bool)? = nil
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: MarkdownSourceEditor
         var applyingExternalText = false
+        private(set) var isComposing = false
+        var appliedSelectionID: UUID?
 
         init(_ parent: MarkdownSourceEditor) { self.parent = parent }
 
         func textDidChange(_ notification: Notification) {
             guard !applyingExternalText, let view = notification.object as? NSTextView else { return }
-            parent.onChange(view.string)
+            guard (view as? MarkdownEditingTextView)?.isHandlingInput != true else { return }
+            publish(view)
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard !applyingExternalText, let view = notification.object as? NSTextView else { return }
+            guard (view as? MarkdownEditingTextView)?.isHandlingInput != true else { return }
+            if isComposing, !view.hasMarkedText() { publish(view) }
+            if !isComposing { parent.onSelectionChanged(view.selectedRange()) }
+        }
+
+        func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            parent.onCommand?(commandSelector, textView) ?? false
+        }
+
+        func beginComposition() {
+            guard !isComposing else { return }
+            isComposing = true
+            parent.onCompositionChanged(true)
+        }
+
+        func finishInput(_ view: NSTextView) {
+            guard !applyingExternalText else { return }
+            publish(view)
+        }
+
+        private func publish(_ view: NSTextView) {
+            let composing = view.hasMarkedText()
+            if isComposing != composing {
+                isComposing = composing
+                parent.onCompositionChanged(composing)
+            }
+            // Marked text belongs to the input method until it is committed.
+            if !composing {
+                if let committed = parent.onCommittedChange { committed(view.string, view.selectedRange()) }
+                else { parent.onChange(view.string) }
+                parent.onSelectionChanged(view.selectedRange())
+            }
         }
     }
 
@@ -28,13 +121,16 @@ struct MarkdownSourceEditor: NSViewRepresentable {
         scroll.autohidesScrollers = true
         scroll.borderType = .noBorder
 
-        let editor = NSTextView(frame: .zero)
+        let editor = MarkdownEditingTextView(frame: .zero)
+        editor.documentUndoManager = documentUndoManager
+        editor.onCompositionStarted = { [weak coordinator = context.coordinator] in coordinator?.beginComposition() }
+        editor.onInputFinished = { [weak coordinator = context.coordinator] in coordinator?.finishInput($0) }
         editor.layoutManager?.allowsNonContiguousLayout = true
         editor.isRichText = false
         editor.importsGraphics = false
         editor.isEditable = true
         editor.isSelectable = true
-        editor.allowsUndo = true
+        editor.allowsUndo = documentUndoManager == nil
         editor.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
         editor.textColor = .textColor
         editor.backgroundColor = .textBackgroundColor
@@ -55,21 +151,52 @@ struct MarkdownSourceEditor: NSViewRepresentable {
         editor.string = text
         editor.delegate = context.coordinator
         scroll.documentView = editor
-        DispatchQueue.main.async { onScrollView(scroll) }
+        DispatchQueue.main.async {
+            onScrollView(scroll)
+            if let initialSelection {
+                editor.window?.makeFirstResponder(editor)
+                let length = (editor.string as NSString).length
+                let start = min(length, max(0, initialSelection.location))
+                editor.setSelectedRange(NSRange(location: start, length: min(initialSelection.length, length - start)))
+            }
+        }
         return scroll
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self
         guard let editor = scroll.documentView as? NSTextView else { return }
-        if !sameSourceBytes(editor.string, text) && !editor.hasMarkedText() {
+        if !editor.hasMarkedText(), !context.coordinator.isComposing,
+           !sameSourceBytes(editor.string, text) {
             context.coordinator.applyingExternalText = true
             editor.string = text
-            editor.undoManager?.removeAllActions()
+            if documentUndoManager == nil { editor.undoManager?.removeAllActions() }
             context.coordinator.applyingExternalText = false
             onTextApplied()
         }
+        if let request = selectionRequest, request.id != context.coordinator.appliedSelectionID,
+           !editor.hasMarkedText(), !context.coordinator.isComposing {
+            let length = (editor.string as NSString).length
+            let range = NSRange(location: min(length, request.range.location),
+                                length: min(request.range.length, max(0, length - request.range.location)))
+            editor.setSelectedRange(range)
+            context.coordinator.appliedSelectionID = request.id
+        }
         onScrollView(scroll)
+    }
+
+    static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
+        guard let editor = scroll.documentView as? MarkdownEditingTextView else { return }
+        // Leaving a pane must not leave its tab permanently marked as composing.
+        // Unmarking retains the text visible in the native editor.
+        if coordinator.isComposing || editor.hasMarkedText() {
+            if editor.hasMarkedText() { editor.unmarkText() }
+            coordinator.finishInput(editor)
+        }
+        coordinator.parent.onCompositionChanged(false)
+        editor.delegate = nil
+        editor.onCompositionStarted = nil
+        editor.onInputFinished = nil
     }
 }
 
@@ -162,6 +289,8 @@ struct SplitHandle: NSViewRepresentable {
     let onDragStarted: () -> Void
     let onRatioChanged: (CGFloat) -> Void
     let onDragEnded: () -> Void
+    var accessibilityLabel: String = "调整源码和预览宽度"
+    var identifier: String = "sourcePreviewResizeHandle"
 
     func makeNSView(context: Context) -> NSView {
         let view = SplitHandleView()
@@ -184,10 +313,28 @@ struct SplitHandle: NSViewRepresentable {
         view.onDragStarted = onDragStarted
         view.onRatioChanged = onRatioChanged
         view.onDragEnded = onDragEnded
+        view.identifier = NSUserInterfaceItemIdentifier(identifier)
+        view.setAccessibilityElement(true)
+        view.setAccessibilityRole(.splitter)
+        view.setAccessibilityLabel(accessibilityLabel)
         if cursorChanged {
             view.updateTrackingAreas()
             view.window?.invalidateCursorRects(for: view)
         }
+    }
+}
+
+enum OutlineLayout {
+    static func limits(in width: CGFloat) -> ClosedRange<CGFloat> {
+        let width = max(1, width)
+        let minimum = min(160, width * 0.45)
+        let maximum = min(420, max(minimum, width * 0.55))
+        return minimum...maximum
+    }
+
+    static func width(_ preferred: CGFloat, in available: CGFloat) -> CGFloat {
+        let limits = limits(in: available)
+        return min(limits.upperBound, max(limits.lowerBound, preferred))
     }
 }
 

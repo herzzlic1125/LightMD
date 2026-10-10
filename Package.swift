@@ -22,7 +22,7 @@ let package = Package(
             .product(name: "Markdown", package: "swift-markdown"),
             .product(name: "MathJaxSwift", package: "MathJaxSwift"),
             .product(name: "SwiftDraw", package: "SwiftDraw")
-        ], path: ".", exclude: generatedBundles + ["docs", "AGENTS.md", "Lesson.md", "Info.plist", "README.md", "README.zh-CN.md", "LICENSE", "CONTRIBUTING.md", "ThirdPartyNotices.md", ".github", "Font-notes.md", "Checks", "cmark-cjk-emphasis.patch", "mathjax-app-resources.patch", "build.sh", "zh-Hans.lproj", "Assets", "LightMD-preview.html"], sources: ["LightMD.swift", "EditorSupport.swift", "WindowChrome.swift", "SessionStore.swift", "MathMarkup.swift", "MathRenderer.swift", "MediaSupport.swift", "WebRenderSupport.swift", "MermaidSupport.swift", "PDFExport.swift"]),
+        ], path: ".", exclude: generatedBundles + ["docs", "AGENTS.md", "Lesson.md", "Info.plist", "README.md", "README.zh-CN.md", "LICENSE", "CONTRIBUTING.md", "ThirdPartyNotices.md", ".github", "Font-notes.md", "Checks", "cmark-cjk-emphasis.patch", "mathjax-app-resources.patch", "build.sh", "zh-Hans.lproj", "Assets", "LightMD-preview.html"], sources: ["LightMD.swift", "EditorSupport.swift", "DocumentEditing.swift", "LiveEditing.swift", "WindowChrome.swift", "SessionStore.swift", "MathMarkup.swift", "MathRenderer.swift", "MediaSupport.swift", "WebRenderSupport.swift", "MermaidSupport.swift", "PDFExport.swift"]),
         .executableTarget(name: "CJKParserCheck", dependencies: [
             .product(name: "Markdown", package: "swift-markdown")
         ], path: "Checks", exclude: ["Features", "Documentation", "Performance"])

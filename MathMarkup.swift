@@ -13,15 +13,45 @@ struct MathToken {
 struct PreparedMarkdown {
     let text: String
     let tokens: [String: MathToken]
+    var replacements: [MathSourceReplacement] = []
+}
+
+struct MathSourceReplacement {
+    let original: NSRange
+    let prepared: NSRange
 }
 
 enum MathMarkup {
+    private static let markerRegex = try! NSRegularExpression(pattern: "\u{E000}LM[0-9]+\u{E001}")
+
+    static func tokens(in text: String, from tokens: [String: MathToken]) -> [MathToken] {
+        guard text.contains("\u{E000}") else { return [] }
+        let content = text as NSString
+        return markerRegex.matches(in: text, range: NSRange(location: 0, length: content.length))
+            .compactMap { tokens[content.substring(with: $0.range)] }
+    }
+
+    static func readable(_ text: String, tokens: [String: MathToken]) -> String {
+        guard text.contains("\u{E000}") else { return text }
+        let content = text as NSString
+        let output = NSMutableString(string: text)
+        for match in markerRegex.matches(in: text, range: NSRange(location: 0, length: content.length)).reversed() {
+            if let token = tokens[content.substring(with: match.range)] {
+                output.replaceCharacters(in: match.range, with: token.original)
+            }
+        }
+        return output as String
+    }
+
     static func prepare(_ source: String) -> PreparedMarkdown {
         guard source.contains("$") || source.contains("\\(") || source.contains("\\[") else {
             return PreparedMarkdown(text: source, tokens: [:])
         }
         let characters = Array(source)
         var output = ""
+        var originalOffset = 0
+        var preparedOffset = 0
+        var replacements: [MathSourceReplacement] = []
         var tokens: [String: MathToken] = [:]
         var cursor = 0
         var line = 1
@@ -43,6 +73,9 @@ enum MathMarkup {
             while cursor < end {
                 let character = characters[cursor]
                 output.append(character)
+                let length = String(character).utf16.count
+                originalOffset += length
+                preparedOffset += length
                 if character.isNewline { line += 1; lineStart = true }
                 else { lineStart = false }
                 cursor += 1
@@ -201,8 +234,17 @@ enum MathMarkup {
                         let firstLine = line
                         let original = String(characters[cursor..<after])
                         let marker = "\u{E000}LM\(tokens.count)\u{E001}"
+                        let replacementStart = preparedOffset
                         output.append(contentsOf: marker)
-                        for character in original where character.isNewline { output.append(character) }
+                        preparedOffset += marker.utf16.count
+                        for character in original where character.isNewline {
+                            output.append(character)
+                            preparedOffset += String(character).utf16.count
+                        }
+                        replacements.append(MathSourceReplacement(
+                            original: NSRange(location: originalOffset, length: original.utf16.count),
+                            prepared: NSRange(location: replacementStart, length: preparedOffset - replacementStart)))
+                        originalOffset += original.utf16.count
                         line += original.filter(\.isNewline).count
                         lineStart = original.last?.isNewline == true
                         tokens[marker] = MathToken(marker: marker, original: original, formula: formula,
@@ -214,6 +256,6 @@ enum MathMarkup {
             }
             appendOriginal(until: cursor + 1)
         }
-        return PreparedMarkdown(text: output, tokens: tokens)
+        return PreparedMarkdown(text: output, tokens: tokens, replacements: replacements)
     }
 }

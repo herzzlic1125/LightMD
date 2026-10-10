@@ -55,7 +55,7 @@ plist = {'CFBundleIdentifier': 'local.lightmd.offscreen-check', 'CFBundleName': 
 with (bundle / 'Contents/Info.plist').open('wb') as file:
     plistlib.dump(plist, file)
 run('swiftc', *flags, work / 'LightMD-test.swift',
-    *[root / name for name in ['EditorSupport.swift', 'WindowChrome.swift', 'SessionStore.swift',
+    *[root / name for name in ['EditorSupport.swift', 'DocumentEditing.swift', 'LiveEditing.swift', 'WindowChrome.swift', 'SessionStore.swift',
                                'MathMarkup.swift', 'MediaSupport.swift',
                                'WebRenderSupport.swift', 'MermaidSupport.swift', 'PDFExport.swift']],
     work / 'MathRenderer-test.swift', root / 'Checks/Performance/ScrollChecks.swift', *objects, '-o', macos / 'FeatureCheck')

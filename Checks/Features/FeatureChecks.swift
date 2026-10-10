@@ -387,10 +387,45 @@ import Combine
 @main @MainActor struct FeatureChecks {
     static func main() throws {
         setbuf(stdout, nil)
+        if ProcessInfo.processInfo.environment["LIGHTMD_PDF_CHECK_ONLY"] == "1" {
+            _ = NSApplication.shared
+            NSApp.setActivationPolicy(.prohibited)
+            var finished = false
+            var failure: Error?
+            Task { @MainActor in
+                do { try await PaginationChecks.run() } catch { failure = error }
+                finished = true
+            }
+            while !finished { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+            if let failure { throw failure }
+            return
+        }
+        if ProcessInfo.processInfo.environment["LIGHTMD_LIVE_CHECK_ONLY"] == "1" {
+            _ = NSApplication.shared
+            NSApp.setActivationPolicy(.prohibited)
+            try LiveEditingChecks.run()
+            try LiveEditingChecks.performance()
+            return
+        }
+        if ProcessInfo.processInfo.environment["LIGHTMD_EDITING_CHECK_ONLY"] == "1" {
+            _ = NSApplication.shared
+            NSApp.setActivationPolicy(.prohibited)
+            try EditingChecks.run()
+            return
+        }
+        if ProcessInfo.processInfo.environment["LIGHTMD_LAYOUT_CHECK_ONLY"] == "1" {
+            _ = NSApplication.shared
+            NSApp.setActivationPolicy(.prohibited)
+            try ReadingLayoutChecks.run()
+            return
+        }
         try SessionCheck.run()
         MathMarkupCheck.run()
         try FeatureRenderCheck.run()
         FormulaSchedulingCheck.run()
+        try ReadingLayoutChecks.run()
+        try EditingChecks.run()
+        try LiveEditingChecks.run()
         var finished = false
         var exportError: Error?
         Task { @MainActor in
